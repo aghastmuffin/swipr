@@ -8,29 +8,34 @@ import {
   Check,
   Cloud,
   HardDrive,
+  Heart,
   MapPin,
   RotateCcw,
   Share2,
   Sparkles,
   Trash2,
 } from 'lucide-react-native';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Dimensions,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
   Pressable,
   StyleSheet,
   Text,
   View,
   ViewToken,
 } from 'react-native';
-import { FlatList, Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
   Extrapolation,
   interpolate,
   runOnJS,
+  useAnimatedScrollHandler,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withDelay,
   withSequence,
@@ -126,10 +131,14 @@ function PhotoChrome({
   photo,
   onKeep,
   onDelete,
+  keepMode = 'check',
+  isKept = false,
 }: {
   photo: PhotoAsset;
   onKeep: () => void;
   onDelete: () => void;
+  keepMode?: 'check' | 'heart';
+  isKept?: boolean;
 }) {
   return (
     <View pointerEvents="box-none" style={styles.chrome}>
@@ -162,12 +171,21 @@ function PhotoChrome({
 
       <View style={styles.chromeRight}>
         <Pressable
-          accessibilityLabel="Keep photo"
+          accessibilityLabel={isKept ? 'Unkeep photo' : 'Keep photo'}
           style={styles.sideAction}
           onPress={onKeep}
         >
-          <Check size={26} color={colors.white} strokeWidth={2.6} />
-          <Text style={styles.sideActionLabel}>Keep</Text>
+          {keepMode === 'heart' ? (
+            <Heart
+              size={26}
+              color={isKept ? colors.keep : colors.white}
+              fill={isKept ? colors.keep : 'transparent'}
+              strokeWidth={2.4}
+            />
+          ) : (
+            <Check size={26} color={colors.white} strokeWidth={2.6} />
+          )}
+          <Text style={styles.sideActionLabel}>{keepMode === 'heart' ? 'Like' : 'Keep'}</Text>
         </Pressable>
         <Pressable
           accessibilityLabel="Share photo"
@@ -186,6 +204,24 @@ function PhotoChrome({
           <Text style={styles.sideActionLabel}>Delete</Text>
         </Pressable>
       </View>
+    </View>
+  );
+}
+
+function MonthDone({ onOpenDelete }: { onOpenDelete: () => void }) {
+  return (
+    <View style={styles.finished}>
+      <View style={styles.finishedMark}>
+        <Check size={30} color={colors.white} />
+      </View>
+      <Text style={styles.finishedTitle}>Month done</Text>
+      <Text style={styles.finishedText}>
+        Open the Delete tab to remove queued photos.
+      </Text>
+      <Pressable style={styles.reviewQueueButton} onPress={onOpenDelete}>
+        <Trash2 size={18} color={colors.white} />
+        <Text style={styles.reviewQueueText}>Review delete queue</Text>
+      </Pressable>
     </View>
   );
 }
@@ -443,21 +479,7 @@ function CardMode({
   }));
 
   if (!current) {
-    return (
-      <View style={styles.finished}>
-        <View style={styles.finishedMark}>
-          <Check size={30} color={colors.white} />
-        </View>
-        <Text style={styles.finishedTitle}>Month done</Text>
-        <Text style={styles.finishedText}>
-          Open the Delete tab to remove queued photos.
-        </Text>
-        <Pressable style={styles.reviewQueueButton} onPress={onOpenDelete}>
-          <Trash2 size={18} color={colors.white} />
-          <Text style={styles.reviewQueueText}>Review delete queue</Text>
-        </Pressable>
-      </View>
-    );
+    return <MonthDone onOpenDelete={onOpenDelete} />;
   }
 
   return (
@@ -498,183 +520,113 @@ function CardMode({
   );
 }
 
+type VerticalListItem =
+  | { type: 'photo'; id: string; photo: PhotoAsset; index: number }
+  | { type: 'done'; id: 'done' };
+
 function VerticalPage({
   photo,
+  nextPhoto,
+  index,
   decision,
-  onDecide,
+  scrollY,
+  onKeep,
+  onUnkeep,
+  onDelete,
 }: {
   photo: PhotoAsset;
+  nextPhoto?: PhotoAsset;
+  index: number;
   decision?: ReviewDecision;
-  onDecide: (photo: PhotoAsset, decision: ReviewDecision) => void;
+  scrollY: { value: number };
+  onKeep: () => void;
+  onUnkeep: () => void;
+  onDelete: () => void;
 }) {
-  const translateX = useSharedValue(0);
-  const deleteBadge = useSharedValue(0);
   const keepBadge = useSharedValue(0);
-  const locked = useSharedValue(0);
+  const forcedDelete = useSharedValue(0);
+  const isKept = useSharedValue(decision === 'keep' ? 1 : 0);
 
-  const resetBadges = () => {
-    'worklet';
-    deleteBadge.value = 0;
-    keepBadge.value = 0;
-  };
+  useEffect(() => {
+    isKept.value = decision === 'keep' ? 1 : 0;
+  }, [decision, isKept]);
 
-  const commitKeep = () => {
-    onDecide(photo, 'keep');
-    translateX.value = 0;
-    keepBadge.value = 0;
-    locked.value = 0;
-  };
+  const deleteProgress = useDerivedValue(() => {
+    if (isKept.value) return forcedDelete.value;
+    const start = index * VERTICAL_PAGE_HEIGHT;
+    const scrolled = interpolate(
+      scrollY.value,
+      [start, start + VERTICAL_PAGE_HEIGHT * 0.55],
+      [0, 1],
+      Extrapolation.CLAMP,
+    );
+    return Math.max(scrolled, forcedDelete.value);
+  });
 
-  const commitDelete = () => {
-    onDecide(photo, 'delete');
-    translateX.value = 0;
-    deleteBadge.value = 0;
-    locked.value = 0;
-  };
-
-  const playKeep = () => {
-    if (locked.value) return;
-    locked.value = 1;
+  const playKeepAndAdvance = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     keepBadge.value = withSequence(
       withSpring(1, { damping: 11, stiffness: 220, mass: 0.7 }),
       withDelay(
         KEEP_BADGE_HOLD_MS,
-        withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) }, () => {
-          runOnJS(commitKeep)();
-        }),
+        withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) }),
       ),
     );
+    onKeep();
   };
 
-  const startKeepFling = (velocityX = 0) => {
-    'worklet';
-    if (locked.value) return;
-    locked.value = 1;
-    keepBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
-    translateX.value = withSpring(
-      SCREEN_WIDTH * 1.3,
-      { ...FLING_SPRING, velocity: Math.max(velocityX, 900) },
-      (finished) => {
-        if (!finished) return;
-        runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
-        runOnJS(commitKeep)();
-      },
-    );
+  const toggleHeart = () => {
+    if (decision === 'keep') {
+      onUnkeep();
+      keepBadge.value = withTiming(0, { duration: 120 });
+      return;
+    }
+    playKeepAndAdvance();
   };
 
-  const startDeleteFling = (velocityX = 0) => {
-    'worklet';
-    if (locked.value) return;
-    locked.value = 1;
-    deleteBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
-    translateX.value = withSpring(
-      -SCREEN_WIDTH * 1.3,
-      { ...FLING_SPRING, velocity: Math.min(velocityX, -900) },
-      (finished) => {
-        if (!finished) return;
-        runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Warning);
-        runOnJS(commitDelete)();
-      },
-    );
+  const playDelete = () => {
+    if (decision === 'keep') return;
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    forcedDelete.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
+    onDelete();
   };
 
-  const keepTap = Gesture.Tap()
+  const doubleTap = Gesture.Tap()
     .numberOfTaps(2)
     .maxDuration(260)
     .maxDelay(180)
     .onEnd((_event, success) => {
-      if (!success || locked.value) return;
-      runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
-      runOnJS(playKeep)();
+      if (!success) return;
+      runOnJS(playKeepAndAdvance)();
     });
 
-  const pan = Gesture.Pan()
-    .activeOffsetX([-8, 8])
-    // Allow a little diagonal drift without losing the swipe to the feed scroll.
-    .failOffsetY([-56, 56])
-    .onUpdate((event) => {
-      if (locked.value) return;
-      // 1:1 finger tracking — rubber-banding felt sticky / “news article”-like.
-      translateX.value = event.translationX;
-      const progress = swipeProgress(event.translationX);
-      if (event.translationX < 0) {
-        deleteBadge.value = progress;
-        keepBadge.value = 0;
-      } else if (event.translationX > 0) {
-        keepBadge.value = progress;
-        deleteBadge.value = 0;
-      } else {
-        resetBadges();
-      }
-    })
-    .onEnd((event) => {
-      if (locked.value) return;
-      const direction = swipeDirection(event.translationX, event.velocityX);
-      if (shouldCommitSwipe(event.translationX, event.velocityX) && direction < 0) {
-        startDeleteFling(event.velocityX);
-      } else if (shouldCommitSwipe(event.translationX, event.velocityX) && direction > 0) {
-        startKeepFling(event.velocityX);
-      } else {
-        translateX.value = withSpring(0, {
-          damping: 20,
-          stiffness: 280,
-          velocity: event.velocityX,
-        });
-        deleteBadge.value = withTiming(0, { duration: 120 });
-        keepBadge.value = withTiming(0, { duration: 120 });
-      }
-    });
-
-  // Simultaneous so horizontal swipes start immediately (Exclusive waited on double-tap).
-  const gesture = Gesture.Simultaneous(keepTap, pan);
-
-  const frameStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: translateX.value },
-      {
-        rotate: `${interpolate(
-          translateX.value,
-          [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
-          [-7, 0, 7],
-          Extrapolation.CLAMP,
-        )}deg`,
-      },
-      {
-        scale: interpolate(
-          Math.abs(translateX.value),
-          [0, SCREEN_WIDTH * 0.55],
-          [1, 0.94],
-          Extrapolation.CLAMP,
-        ),
-      },
-    ],
-  }));
+  // Keep native vertical paging free while still catching double-tap likes.
+  const gesture = Gesture.Simultaneous(doubleTap, Gesture.Native());
 
   const photoFadeStyle = useAnimatedStyle(() => {
-    const progress = Math.max(deleteBadge.value, keepBadge.value);
+    const progress = Math.max(deleteProgress.value, keepBadge.value);
     return {
-      opacity: interpolate(progress, [0, 1], [1, 0.38], Extrapolation.CLAMP),
+      opacity: interpolate(progress, [0, 1], [1, 0.42], Extrapolation.CLAMP),
     };
   });
 
   const stageWashStyle = useAnimatedStyle(() => {
-    const progress = Math.max(deleteBadge.value, keepBadge.value);
-    const isDelete = deleteBadge.value >= keepBadge.value;
+    const progress = Math.max(deleteProgress.value, keepBadge.value);
+    const isDelete = deleteProgress.value >= keepBadge.value;
     return {
       backgroundColor: isDelete ? colors.danger : colors.keep,
-      opacity: interpolate(progress, [0, 0.15, 1], [0, 0.92, 1], Extrapolation.CLAMP),
+      opacity: interpolate(progress, [0, 0.15, 1], [0, 0.88, 1], Extrapolation.CLAMP),
     };
   });
 
-  // Stamp stays fully opaque once it appears so DELETE/KEEP text never washes out.
   const deleteBadgeStyle = useAnimatedStyle(() => ({
-    opacity: deleteBadge.value > 0.08 ? 1 : 0,
+    opacity: deleteProgress.value > 0.08 ? 1 : 0,
     transform: [
       {
-        scale: interpolate(deleteBadge.value, [0, 1], [0.72, 1.08], Extrapolation.CLAMP),
+        scale: interpolate(deleteProgress.value, [0, 1], [0.72, 1.08], Extrapolation.CLAMP),
       },
       {
-        rotate: `${interpolate(deleteBadge.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
+        rotate: `${interpolate(deleteProgress.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
       },
     ],
   }));
@@ -693,10 +645,20 @@ function VerticalPage({
 
   return (
     <View style={styles.verticalPage}>
-      <Animated.View pointerEvents="none" style={[styles.decisionWash, stageWashStyle]} />
+      {nextPhoto ? (
+        <View style={styles.verticalUnderlay} pointerEvents="none">
+          <Image source={{ uri: nextPhoto.uri }} style={styles.verticalImage} contentFit="cover" />
+        </View>
+      ) : (
+        <View style={[styles.verticalUnderlay, styles.verticalUnderlayDone]} pointerEvents="none" />
+      )}
+      <Animated.View
+        pointerEvents="none"
+        style={[styles.decisionWash, styles.verticalWash, stageWashStyle]}
+      />
       <GestureDetector gesture={gesture}>
         <Animated.View style={styles.verticalImageWrap}>
-          <Animated.View style={[styles.verticalImage, frameStyle, photoFadeStyle]}>
+          <Animated.View style={[styles.verticalImage, photoFadeStyle]}>
             <Image source={{ uri: photo.uri }} style={styles.verticalImage} contentFit="cover" />
             <View style={styles.verticalShade} />
             <LinearGradient
@@ -708,8 +670,10 @@ function VerticalPage({
             <DecisionOverlay decision={decision} />
             <PhotoChrome
               photo={photo}
-              onKeep={playKeep}
-              onDelete={startDeleteFling}
+              keepMode="heart"
+              isKept={decision === 'keep'}
+              onKeep={toggleHeart}
+              onDelete={playDelete}
             />
           </Animated.View>
           <View pointerEvents="none" style={styles.badgeLayer}>
@@ -727,41 +691,130 @@ function VerticalMode({
   startIndex,
   decisions,
   onDecide,
+  onClearDecision,
+  onOpenDelete,
 }: {
   photos: PhotoAsset[];
   startIndex: number;
   decisions: ReturnType<typeof usePhotoStore>['decisions'];
   onDecide: (photo: PhotoAsset, decision: ReviewDecision) => void;
+  onClearDecision: (photo: PhotoAsset) => void;
+  onOpenDelete: () => void;
 }) {
-  const list = useRef<FlatList<PhotoAsset>>(null);
+  const list = useRef<Animated.FlatList<VerticalListItem>>(null);
+  const scrollY = useSharedValue(startIndex * VERTICAL_PAGE_HEIGHT);
   const [visibleIndex, setVisibleIndex] = useState(startIndex);
+  const settledIndex = useRef(startIndex);
+  const decisionsRef = useRef(decisions);
+  decisionsRef.current = decisions;
+
+  const data = useMemo<VerticalListItem[]>(
+    () => [
+      ...photos.map((photo, index) => ({
+        type: 'photo' as const,
+        id: photo.id,
+        photo,
+        index,
+      })),
+      { type: 'done' as const, id: 'done' },
+    ],
+    [photos],
+  );
+
   const viewConfig = useRef({ itemVisiblePercentThreshold: 80 }).current;
   const onViewableItemsChanged = useRef(
-    ({ viewableItems }: { viewableItems: ViewToken<PhotoAsset>[] }) => {
+    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
       if (viewableItems[0]?.index != null) setVisibleIndex(viewableItems[0].index);
     },
   ).current;
 
+  const commitForwardDeletes = (fromIndex: number, toIndex: number) => {
+    if (toIndex <= fromIndex) return;
+    for (let i = fromIndex; i < toIndex && i < photos.length; i += 1) {
+      const photo = photos[i];
+      if (!photo) continue;
+      if (decisionsRef.current[photo.id]?.decision === 'keep') continue;
+      onDecide(photo, 'delete');
+    }
+  };
+
+  const scrollToIndex = (index: number) => {
+    list.current?.scrollToIndex({ index, animated: true });
+  };
+
+  const keepAndAdvance = (photoIndex: number) => {
+    const photo = photos[photoIndex];
+    if (!photo) return;
+    onDecide(photo, 'keep');
+    scrollToIndex(Math.min(photoIndex + 1, data.length - 1));
+  };
+
+  const deleteAndAdvance = (photoIndex: number) => {
+    const photo = photos[photoIndex];
+    if (!photo) return;
+    if (decisionsRef.current[photo.id]?.decision === 'keep') return;
+    onDecide(photo, 'delete');
+    scrollToIndex(Math.min(photoIndex + 1, data.length - 1));
+  };
+
+  const onScroll = useAnimatedScrollHandler({
+    onScroll: (event) => {
+      scrollY.value = event.contentOffset.y;
+    },
+  });
+
+  const settleAtOffset = (offsetY: number) => {
+    const nextIndex = Math.round(offsetY / VERTICAL_PAGE_HEIGHT);
+    const prevIndex = settledIndex.current;
+    commitForwardDeletes(prevIndex, nextIndex);
+    settledIndex.current = nextIndex;
+    setVisibleIndex(nextIndex);
+  };
+
+  const onDone = visibleIndex >= photos.length;
+
   return (
     <View style={styles.verticalStage}>
-      <FlatList
+      <Animated.FlatList
         ref={list}
-        data={photos}
+        data={data}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
-          <VerticalPage
-            photo={item}
-            decision={decisions[item.id]?.decision}
-            onDecide={onDecide}
-          />
-        )}
+        renderItem={({ item }) => {
+          if (item.type === 'done') {
+            return (
+              <View style={[styles.verticalPage, styles.finishedPage]}>
+                <MonthDone onOpenDelete={onOpenDelete} />
+              </View>
+            );
+          }
+          return (
+            <VerticalPage
+              photo={item.photo}
+              nextPhoto={photos[item.index + 1]}
+              index={item.index}
+              decision={decisions[item.photo.id]?.decision}
+              scrollY={scrollY}
+              onKeep={() => keepAndAdvance(item.index)}
+              onUnkeep={() => onClearDecision(item.photo)}
+              onDelete={() => deleteAndAdvance(item.index)}
+            />
+          );
+        }}
         pagingEnabled
-        initialScrollIndex={startIndex}
-        getItemLayout={(_data, index) => ({
+        initialScrollIndex={Math.min(startIndex, Math.max(0, photos.length))}
+        getItemLayout={(_items, index) => ({
           length: VERTICAL_PAGE_HEIGHT,
           offset: VERTICAL_PAGE_HEIGHT * index,
           index,
         })}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        onMomentumScrollEnd={(event) => settleAtOffset(event.nativeEvent.contentOffset.y)}
+        onScrollEndDrag={(event) => {
+          // Paging can settle without momentum on short drags.
+          if (event.nativeEvent.velocity?.y) return;
+          settleAtOffset(event.nativeEvent.contentOffset.y);
+        }}
         onScrollToIndexFailed={() => undefined}
         showsVerticalScrollIndicator={false}
         viewabilityConfig={viewConfig}
@@ -770,7 +823,9 @@ function VerticalMode({
       <View style={styles.verticalCounter}>
         <ArrowDown size={12} color={colors.inkSoft} />
         <Text style={styles.verticalCounterText}>
-          {visibleIndex + 1} / {photos.length}
+          {onDone
+            ? 'Done'
+            : `${Math.min(visibleIndex + 1, photos.length)} / ${photos.length}`}
         </Text>
       </View>
     </View>
@@ -788,8 +843,7 @@ export function ReviewScreen({ monthKey, mode, onClose, onOpenDelete }: Props) {
   );
   const pendingIndex = photos.findIndex((photo) => !decisions[photo.id]);
   const cardStartIndex = pendingIndex === -1 ? photos.length : pendingIndex;
-  const verticalStartIndex =
-    pendingIndex === -1 ? Math.max(0, photos.length - 1) : pendingIndex;
+  const verticalStartIndex = pendingIndex === -1 ? photos.length : pendingIndex;
   const [history, setHistory] = useState<string[]>([]);
   const monthLabel = photos[0]?.monthLabel ?? monthKey;
   const reviewed = photos.filter((photo) => decisions[photo.id]).length;
@@ -797,6 +851,12 @@ export function ReviewScreen({ monthKey, mode, onClose, onOpenDelete }: Props) {
   const decide = (photo: PhotoAsset, decision: ReviewDecision) => {
     setDecision(photo, decision);
     setHistory((current) => [...current.filter((id) => id !== photo.id), photo.id]);
+  };
+
+  const clearDecision = (photo: PhotoAsset) => {
+    undo(photo.id);
+    setHistory((current) => current.filter((id) => id !== photo.id));
+    Haptics.selectionAsync();
   };
 
   const undoLast = () => {
@@ -844,6 +904,8 @@ export function ReviewScreen({ monthKey, mode, onClose, onOpenDelete }: Props) {
           startIndex={verticalStartIndex}
           decisions={decisions}
           onDecide={decide}
+          onClearDecision={clearDecision}
+          onOpenDelete={onOpenDelete}
         />
       )}
     </View>
@@ -896,7 +958,7 @@ const styles = StyleSheet.create({
   },
   nextCard: { transform: [{ scale: 0.965 }, { translateY: 10 }], opacity: 0.55 },
   cardGestureLayer: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     zIndex: 1,
   },
   cardImage: { width: '100%', height: '100%', zIndex: 0 },
@@ -1113,7 +1175,14 @@ const styles = StyleSheet.create({
   reviewQueueText: { color: colors.white, fontWeight: '700', fontSize: 14 },
   verticalStage: { flex: 1, backgroundColor: colors.dark },
   verticalPage: { height: VERTICAL_PAGE_HEIGHT, backgroundColor: colors.dark },
-  verticalImageWrap: { flex: 1, backgroundColor: colors.dark },
+  finishedPage: { backgroundColor: colors.paper },
+  verticalUnderlay: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 0,
+  },
+  verticalUnderlayDone: { backgroundColor: colors.paper },
+  verticalWash: { zIndex: 1 },
+  verticalImageWrap: { flex: 1, backgroundColor: 'transparent', zIndex: 2 },
   verticalImage: { width: '100%', height: '100%', zIndex: 0 },
   verticalShade: {
     position: 'absolute',

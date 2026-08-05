@@ -140,7 +140,9 @@ export function LibraryScreen({ onReview }: Props) {
       </View>
 
       <Text style={styles.hero}>Your photos</Text>
-      <Text style={styles.intro}>Swipe right to keep. Swipe left to queue for delete.</Text>
+      <Text style={styles.intro}>
+        Cards: swipe right to keep, left to delete. Vertical: scroll to delete, double-tap or like to keep.
+      </Text>
 
       {!loading && total > 0 && (
         <View style={styles.overall}>

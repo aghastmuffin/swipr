@@ -11,8 +11,8 @@ You are the Swipr UI specialist for this Expo React Native photo-review app.
 ## Product conventions
 
 ### Swipe decisions
-- Swipe **right** → keep
-- Swipe **left** → delete (queue)
+- **Cards:** swipe **right** → keep, swipe **left** → delete (queue)
+- **Vertical:** scroll past → delete (queue); double-tap or heart → keep (auto-advances); heart can be untapped after scrolling back
 - Double-tap and side buttons may also keep/delete
 - Keep color: `colors.keep` (green). Delete/destroy color: `colors.danger` (red)
 
