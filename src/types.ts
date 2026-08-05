@@ -32,7 +32,10 @@ export interface DecisionRecord {
   decision: ReviewDecision;
   decidedAt: number;
   monthKey: string;
+  monthLabel?: string;
   size?: number;
+  /** Snapshot of the display URI at decision time — keeps delete-queue thumbs alive. */
+  uri?: string;
 }
 
 export interface AppStats {

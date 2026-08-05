@@ -98,6 +98,32 @@ export function SettingsScreen() {
           </>
         )}
       </View>
+      <Text style={styles.sectionTitle}>Support</Text>
+      <View style={styles.panel}>
+        <Pressable
+          style={styles.row}
+          onPress={() => Linking.openURL('mailto:support@swipr.com')}
+        >
+          <View style={styles.rowCopy}>
+            <Text style={styles.rowTitle}>Contact Support</Text>
+            <Text style={styles.rowText}>Get help with any issues or questions</Text>
+          </View>
+        </Pressable>
+      </View>
+      <Text style={styles.sectionTitle}>Brought to you for free by taeson.co</Text>
+      <Text>learn more at taeson.co/swipr</Text>
+      <Text style={styles.sectionTitle}>Legal</Text>
+      <View style={styles.legalBlock}>
+        <Text style={styles.legalTitle}>© {new Date().getFullYear()} Taesonco LLC</Text>
+        <Text style={styles.legalText}>
+          Registered in Berkeley, California, United States.
+        </Text>
+        <Text style={styles.legalText}>
+          It is illegal to repurpose, copy, redistribute, or resell this app or
+          any of its code, design, or content without prior written permission
+          from Taesonco LLC.
+        </Text>
+      </View>
 
       <View style={styles.bottomSpace} />
     </ScrollView>
@@ -124,5 +150,20 @@ const styles = StyleSheet.create({
   rowTitle: { fontFamily: type.serif, color: colors.ink, fontSize: 16 },
   rowText: { fontFamily: type.serif, color: colors.inkSoft, fontSize: 12.5, lineHeight: 18, marginTop: 2 },
   rule: { height: 1, backgroundColor: colors.line, marginLeft: 47 },
+  legalBlock: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: colors.paperRaised,
+    padding: 16,
+    gap: 8,
+  },
+  legalTitle: { fontFamily: type.serif, color: colors.ink, fontSize: 16 },
+  legalText: {
+    fontFamily: type.serif,
+    color: colors.inkSoft,
+    fontSize: 13,
+    lineHeight: 19,
+  },
   bottomSpace: { height: 100 },
 });

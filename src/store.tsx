@@ -25,7 +25,7 @@ import {
 } from './types';
 
 const STORAGE_KEY = '@swipr/review-state-v1';
-const INDEX_KEY = '@swipr/photo-index-v1';
+const INDEX_KEY = '@swipr/photo-index-v2';
 
 const initialStats: AppStats = {
   totalSwiped: 0,
@@ -203,7 +203,9 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
           decision,
           decidedAt: Date.now(),
           monthKey: photo.monthKey,
+          monthLabel: photo.monthLabel,
           size: photo.size,
+          uri: photo.uri,
         },
       };
     });

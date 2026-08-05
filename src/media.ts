@@ -109,6 +109,8 @@ export async function indexPhotoLibrary(
 
   const photos = await mapWithConcurrency(assets, 8, async (asset) => {
     let cloudStatus: CloudStatus = Platform.OS === 'android' ? 'local' : 'unknown';
+    // Prefer the library asset URI for display — local file paths can go stale
+    // between launches and leave delete-queue / grid thumbnails blank.
     let displayUri = asset.uri;
     let size: number | undefined;
     let location: PhotoAsset['location'];
@@ -119,7 +121,6 @@ export async function indexPhotoLibrary(
       const info = await MediaLibrary.getAssetInfoAsync(asset, {
         shouldDownloadFromNetwork: false,
       });
-      displayUri = info.localUri ?? asset.uri;
       cloudStatus = info.isNetworkAsset
         ? 'cloud'
         : info.localUri || Platform.OS === 'android'
@@ -172,6 +173,18 @@ export async function indexPhotoLibrary(
   });
 
   return assignSimilarityGroups(photos);
+}
+
+/** Fresh display URI for a library asset (prefer local file, fall back to asset URI). */
+export async function resolveAssetDisplayUri(assetId: string): Promise<string | undefined> {
+  try {
+    const info = await MediaLibrary.getAssetInfoAsync(assetId, {
+      shouldDownloadFromNetwork: false,
+    });
+    return info.localUri ?? info.uri ?? undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export async function permanentlyDeleteAssets(assetIds: string[]) {

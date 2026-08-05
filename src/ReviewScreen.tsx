@@ -18,14 +18,13 @@ import React, { useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Dimensions,
-  FlatList,
   Pressable,
   StyleSheet,
   Text,
   View,
   ViewToken,
 } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { FlatList, Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
   Extrapolation,
@@ -44,9 +43,12 @@ import { PhotoAsset, ReviewDecision, ReviewMode } from './types';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const VERTICAL_PAGE_HEIGHT = Dimensions.get('window').height - 132;
-const SWIPE_DISTANCE = SCREEN_WIDTH * 0.14;
-const SWIPE_VELOCITY = 420;
-const KEEP_BADGE_HOLD_MS = 480;
+/** Commit once the finger is roughly a quarter across — fling finishes the rest. */
+const SWIPE_DISTANCE = SCREEN_WIDTH * 0.22;
+const SWIPE_VELOCITY = 280;
+const SWIPE_PROJECT_MS = 0.22;
+const KEEP_BADGE_HOLD_MS = 420;
+const FLING_SPRING = { damping: 22, stiffness: 210, mass: 0.75, overshootClamping: true };
 
 type Props = {
   monthKey: string;
@@ -196,8 +198,13 @@ function Stamp({
   style: ReturnType<typeof useAnimatedStyle>;
 }) {
   return (
-    <Animated.View style={[styles.badgeSlot, style]}>
-      <View style={[styles.centerStamp, kind === 'keep' ? styles.keepStamp : styles.deleteStamp]}>
+    <Animated.View pointerEvents="none" style={[styles.badgeSlot, style]}>
+      <View
+        style={[
+          styles.centerStamp,
+          kind === 'keep' ? styles.keepStamp : styles.deleteStamp,
+        ]}
+      >
         {kind === 'keep' ? (
           <Check size={42} color={colors.white} strokeWidth={3.2} />
         ) : (
@@ -206,6 +213,33 @@ function Stamp({
         <Text style={styles.centerStampText}>{kind === 'keep' ? 'KEEP' : 'DELETE'}</Text>
       </View>
     </Animated.View>
+  );
+}
+
+function swipeProgress(distance: number) {
+  'worklet';
+  return interpolate(
+    Math.abs(distance),
+    [0, 12, SWIPE_DISTANCE, SCREEN_WIDTH * 0.45],
+    [0, 0.45, 1, 1],
+    Extrapolation.CLAMP,
+  );
+}
+
+function swipeDirection(translationX: number, velocityX: number) {
+  'worklet';
+  if (translationX !== 0) return Math.sign(translationX);
+  return Math.sign(velocityX);
+}
+
+/** True when a short drag or flick should finish the keep/delete animation. */
+function shouldCommitSwipe(translationX: number, velocityX: number) {
+  'worklet';
+  const projected = translationX + velocityX * SWIPE_PROJECT_MS;
+  return (
+    Math.abs(translationX) > SWIPE_DISTANCE ||
+    Math.abs(velocityX) > SWIPE_VELOCITY ||
+    Math.abs(projected) > SWIPE_DISTANCE * 0.85
   );
 }
 
@@ -261,19 +295,30 @@ function CardMode({
     );
   };
 
-  const startDeleteFling = (direction: number) => {
+  const startKeepFling = (velocityX = 0) => {
     'worklet';
     if (locked.value) return;
     locked.value = 1;
-    deleteBadge.value = withSequence(
-      withTiming(1, { duration: 80 }),
-      withTiming(0.25, { duration: 200 }),
+    keepBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
+    translateX.value = withSpring(
+      SCREEN_WIDTH * 1.35,
+      { ...FLING_SPRING, velocity: Math.max(velocityX, 900) },
+      (finished) => {
+        if (finished) runOnJS(commit)('keep');
+      },
     );
-    translateX.value = withTiming(
-      direction * SCREEN_WIDTH * 1.35,
-      { duration: 240, easing: Easing.out(Easing.cubic) },
-      () => {
-        runOnJS(commit)('delete');
+  };
+
+  const startDeleteFling = (velocityX = 0) => {
+    'worklet';
+    if (locked.value) return;
+    locked.value = 1;
+    deleteBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
+    translateX.value = withSpring(
+      -SCREEN_WIDTH * 1.35,
+      { ...FLING_SPRING, velocity: Math.min(velocityX, -900) },
+      (finished) => {
+        if (finished) runOnJS(commit)('delete');
       },
     );
   };
@@ -284,12 +329,13 @@ function CardMode({
       playKeepThenCommit();
       return;
     }
-    startDeleteFling(1);
+    startDeleteFling(-1200);
   };
 
   const doubleTap = Gesture.Tap()
     .numberOfTaps(2)
-    .maxDuration(280)
+    .maxDuration(260)
+    .maxDelay(180)
     .onEnd((_event, success) => {
       if (!success || locked.value) return;
       runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
@@ -297,38 +343,41 @@ function CardMode({
     });
 
   const pan = Gesture.Pan()
-    .activeOffsetX([-12, 12])
-    .failOffsetY([-36, 36])
+    .activeOffsetX([-8, 8])
+    .failOffsetY([-48, 48])
     .onUpdate((event) => {
       if (locked.value) return;
       translateX.value = event.translationX;
-      translateY.value = event.translationY * 0.08;
-      deleteBadge.value = interpolate(
-        Math.abs(event.translationX),
-        [0, 18, SWIPE_DISTANCE, SCREEN_WIDTH * 0.55],
-        [0, 0.55, 1, 1],
-        Extrapolation.CLAMP,
-      );
+      translateY.value = event.translationY * 0.06;
+      const progress = swipeProgress(event.translationX);
+      if (event.translationX < 0) {
+        deleteBadge.value = progress;
+        keepBadge.value = 0;
+      } else if (event.translationX > 0) {
+        keepBadge.value = progress;
+        deleteBadge.value = 0;
+      } else {
+        deleteBadge.value = 0;
+        keepBadge.value = 0;
+      }
     })
     .onEnd((event) => {
       if (locked.value) return;
-      const shouldDelete =
-        Math.abs(event.translationX) > SWIPE_DISTANCE ||
-        Math.abs(event.velocityX) > SWIPE_VELOCITY;
-      if (shouldDelete) {
-        const direction =
-          event.translationX === 0
-            ? Math.sign(event.velocityX) || 1
-            : Math.sign(event.translationX);
-        startDeleteFling(direction);
+      const direction = swipeDirection(event.translationX, event.velocityX);
+      if (shouldCommitSwipe(event.translationX, event.velocityX) && direction < 0) {
+        startDeleteFling(event.velocityX);
+      } else if (shouldCommitSwipe(event.translationX, event.velocityX) && direction > 0) {
+        startKeepFling(event.velocityX);
       } else {
-        translateX.value = withSpring(0, { damping: 18, stiffness: 220 });
-        translateY.value = withSpring(0, { damping: 18, stiffness: 220 });
-        deleteBadge.value = withTiming(0, { duration: 140 });
+        translateX.value = withSpring(0, { damping: 20, stiffness: 280, velocity: event.velocityX });
+        translateY.value = withSpring(0, { damping: 20, stiffness: 280 });
+        deleteBadge.value = withTiming(0, { duration: 120 });
+        keepBadge.value = withTiming(0, { duration: 120 });
       }
     });
 
-  const gesture = Gesture.Exclusive(doubleTap, pan);
+  // Simultaneous so the pan does not wait for the double-tap timeout.
+  const gesture = Gesture.Simultaneous(doubleTap, pan);
 
   const cardStyle = useAnimatedStyle(() => ({
     transform: [
@@ -353,11 +402,27 @@ function CardMode({
     ],
   }));
 
+  const photoFadeStyle = useAnimatedStyle(() => {
+    const progress = Math.max(deleteBadge.value, keepBadge.value);
+    return {
+      opacity: interpolate(progress, [0, 1], [1, 0.42], Extrapolation.CLAMP),
+    };
+  });
+
+  const stageWashStyle = useAnimatedStyle(() => {
+    const progress = Math.max(deleteBadge.value, keepBadge.value);
+    const isDelete = deleteBadge.value >= keepBadge.value;
+    return {
+      backgroundColor: isDelete ? colors.danger : colors.keep,
+      opacity: interpolate(progress, [0, 0.15, 1], [0, 0.88, 1], Extrapolation.CLAMP),
+    };
+  });
+
   const deleteBadgeStyle = useAnimatedStyle(() => ({
-    opacity: deleteBadge.value,
+    opacity: deleteBadge.value > 0.08 ? 1 : 0,
     transform: [
       {
-        scale: interpolate(deleteBadge.value, [0, 1], [0.45, 1.08], Extrapolation.CLAMP),
+        scale: interpolate(deleteBadge.value, [0, 1], [0.72, 1.08], Extrapolation.CLAMP),
       },
       {
         rotate: `${interpolate(deleteBadge.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
@@ -366,10 +431,10 @@ function CardMode({
   }));
 
   const keepBadgeStyle = useAnimatedStyle(() => ({
-    opacity: keepBadge.value,
+    opacity: keepBadge.value > 0.08 ? 1 : 0,
     transform: [
       {
-        scale: interpolate(keepBadge.value, [0, 1], [0.35, 1.12], Extrapolation.CLAMP),
+        scale: interpolate(keepBadge.value, [0, 1], [0.72, 1.12], Extrapolation.CLAMP),
       },
       {
         rotate: `${interpolate(keepBadge.value, [0, 1], [-18, -6], Extrapolation.CLAMP)}deg`,
@@ -402,28 +467,33 @@ function CardMode({
           <Image source={{ uri: next.uri }} style={styles.cardImage} contentFit="cover" />
         </View>
       )}
-      <GestureDetector gesture={gesture}>
-        <Animated.View style={[styles.photoCard, cardStyle]}>
-          <Image source={{ uri: current.uri }} style={styles.cardImage} contentFit="cover" />
-          <View style={styles.cardShade} />
-          <LinearGradient
-            pointerEvents="none"
-            colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
-            locations={[0, 0.45, 1]}
-            style={styles.bottomFade}
-          />
-          <DecisionOverlay decision={decisions[current.id]?.decision} />
-          <PhotoChrome
-            photo={current}
-            onKeep={() => animateDecision('keep')}
-            onDelete={() => animateDecision('delete')}
-          />
-          <View pointerEvents="none" style={styles.badgeLayer}>
-            <Stamp kind="keep" style={keepBadgeStyle} />
-            <Stamp kind="delete" style={deleteBadgeStyle} />
-          </View>
-        </Animated.View>
-      </GestureDetector>
+      <View style={styles.photoCard}>
+        <Animated.View pointerEvents="none" style={[styles.decisionWash, stageWashStyle]} />
+        <GestureDetector gesture={gesture}>
+          <Animated.View style={[styles.cardGestureLayer, cardStyle]}>
+            <Animated.View style={[styles.cardImage, photoFadeStyle]}>
+              <Image source={{ uri: current.uri }} style={styles.cardImage} contentFit="cover" />
+            </Animated.View>
+            <View style={styles.cardShade} />
+            <LinearGradient
+              pointerEvents="none"
+              colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
+              locations={[0, 0.45, 1]}
+              style={styles.bottomFade}
+            />
+            <DecisionOverlay decision={decisions[current.id]?.decision} />
+            <PhotoChrome
+              photo={current}
+              onKeep={() => animateDecision('keep')}
+              onDelete={() => animateDecision('delete')}
+            />
+          </Animated.View>
+        </GestureDetector>
+        <View pointerEvents="none" style={styles.badgeLayer}>
+          <Stamp kind="keep" style={keepBadgeStyle} />
+          <Stamp kind="delete" style={deleteBadgeStyle} />
+        </View>
+      </View>
     </View>
   );
 }
@@ -442,8 +512,15 @@ function VerticalPage({
   const keepBadge = useSharedValue(0);
   const locked = useSharedValue(0);
 
+  const resetBadges = () => {
+    'worklet';
+    deleteBadge.value = 0;
+    keepBadge.value = 0;
+  };
+
   const commitKeep = () => {
     onDecide(photo, 'keep');
+    translateX.value = 0;
     keepBadge.value = 0;
     locked.value = 0;
   };
@@ -469,18 +546,32 @@ function VerticalPage({
     );
   };
 
-  const startDeleteFling = (direction: number) => {
+  const startKeepFling = (velocityX = 0) => {
     'worklet';
     if (locked.value) return;
     locked.value = 1;
-    deleteBadge.value = withSequence(
-      withTiming(1, { duration: 80 }),
-      withTiming(0.25, { duration: 200 }),
+    keepBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
+    translateX.value = withSpring(
+      SCREEN_WIDTH * 1.3,
+      { ...FLING_SPRING, velocity: Math.max(velocityX, 900) },
+      (finished) => {
+        if (!finished) return;
+        runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
+        runOnJS(commitKeep)();
+      },
     );
-    translateX.value = withTiming(
-      direction * SCREEN_WIDTH * 1.25,
-      { duration: 230, easing: Easing.out(Easing.cubic) },
-      () => {
+  };
+
+  const startDeleteFling = (velocityX = 0) => {
+    'worklet';
+    if (locked.value) return;
+    locked.value = 1;
+    deleteBadge.value = withSpring(1, { damping: 14, stiffness: 260, mass: 0.6 });
+    translateX.value = withSpring(
+      -SCREEN_WIDTH * 1.3,
+      { ...FLING_SPRING, velocity: Math.min(velocityX, -900) },
+      (finished) => {
+        if (!finished) return;
         runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Warning);
         runOnJS(commitDelete)();
       },
@@ -489,64 +580,98 @@ function VerticalPage({
 
   const keepTap = Gesture.Tap()
     .numberOfTaps(2)
-    .maxDuration(280)
+    .maxDuration(260)
+    .maxDelay(180)
     .onEnd((_event, success) => {
       if (!success || locked.value) return;
       runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
       runOnJS(playKeep)();
     });
 
-  const deletePan = Gesture.Pan()
-    .activeOffsetX([-12, 12])
-    .failOffsetY([-24, 24])
+  const pan = Gesture.Pan()
+    .activeOffsetX([-8, 8])
+    // Allow a little diagonal drift without losing the swipe to the feed scroll.
+    .failOffsetY([-56, 56])
     .onUpdate((event) => {
       if (locked.value) return;
-      translateX.value = event.translationX * 0.92;
-      deleteBadge.value = interpolate(
-        Math.abs(event.translationX),
-        [0, 18, SWIPE_DISTANCE, SCREEN_WIDTH * 0.55],
-        [0, 0.55, 1, 1],
-        Extrapolation.CLAMP,
-      );
+      // 1:1 finger tracking — rubber-banding felt sticky / “news article”-like.
+      translateX.value = event.translationX;
+      const progress = swipeProgress(event.translationX);
+      if (event.translationX < 0) {
+        deleteBadge.value = progress;
+        keepBadge.value = 0;
+      } else if (event.translationX > 0) {
+        keepBadge.value = progress;
+        deleteBadge.value = 0;
+      } else {
+        resetBadges();
+      }
     })
     .onEnd((event) => {
       if (locked.value) return;
-      const shouldDelete =
-        Math.abs(event.translationX) > SWIPE_DISTANCE ||
-        Math.abs(event.velocityX) > SWIPE_VELOCITY;
-      if (shouldDelete) {
-        const direction =
-          event.translationX === 0
-            ? Math.sign(event.velocityX) || 1
-            : Math.sign(event.translationX);
-        startDeleteFling(direction);
+      const direction = swipeDirection(event.translationX, event.velocityX);
+      if (shouldCommitSwipe(event.translationX, event.velocityX) && direction < 0) {
+        startDeleteFling(event.velocityX);
+      } else if (shouldCommitSwipe(event.translationX, event.velocityX) && direction > 0) {
+        startKeepFling(event.velocityX);
       } else {
-        translateX.value = withSpring(0, { damping: 18, stiffness: 220 });
-        deleteBadge.value = withTiming(0, { duration: 140 });
+        translateX.value = withSpring(0, {
+          damping: 20,
+          stiffness: 280,
+          velocity: event.velocityX,
+        });
+        deleteBadge.value = withTiming(0, { duration: 120 });
+        keepBadge.value = withTiming(0, { duration: 120 });
       }
     });
 
-  const gesture = Gesture.Exclusive(keepTap, deletePan);
+  // Simultaneous so horizontal swipes start immediately (Exclusive waited on double-tap).
+  const gesture = Gesture.Simultaneous(keepTap, pan);
 
-  const imageStyle = useAnimatedStyle(() => ({
+  const frameStyle = useAnimatedStyle(() => ({
     transform: [
       { translateX: translateX.value },
       {
+        rotate: `${interpolate(
+          translateX.value,
+          [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
+          [-7, 0, 7],
+          Extrapolation.CLAMP,
+        )}deg`,
+      },
+      {
         scale: interpolate(
           Math.abs(translateX.value),
-          [0, SCREEN_WIDTH * 0.7],
-          [1, 0.97],
+          [0, SCREEN_WIDTH * 0.55],
+          [1, 0.94],
           Extrapolation.CLAMP,
         ),
       },
     ],
   }));
 
+  const photoFadeStyle = useAnimatedStyle(() => {
+    const progress = Math.max(deleteBadge.value, keepBadge.value);
+    return {
+      opacity: interpolate(progress, [0, 1], [1, 0.38], Extrapolation.CLAMP),
+    };
+  });
+
+  const stageWashStyle = useAnimatedStyle(() => {
+    const progress = Math.max(deleteBadge.value, keepBadge.value);
+    const isDelete = deleteBadge.value >= keepBadge.value;
+    return {
+      backgroundColor: isDelete ? colors.danger : colors.keep,
+      opacity: interpolate(progress, [0, 0.15, 1], [0, 0.92, 1], Extrapolation.CLAMP),
+    };
+  });
+
+  // Stamp stays fully opaque once it appears so DELETE/KEEP text never washes out.
   const deleteBadgeStyle = useAnimatedStyle(() => ({
-    opacity: deleteBadge.value,
+    opacity: deleteBadge.value > 0.08 ? 1 : 0,
     transform: [
       {
-        scale: interpolate(deleteBadge.value, [0, 1], [0.45, 1.08], Extrapolation.CLAMP),
+        scale: interpolate(deleteBadge.value, [0, 1], [0.72, 1.08], Extrapolation.CLAMP),
       },
       {
         rotate: `${interpolate(deleteBadge.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
@@ -555,10 +680,10 @@ function VerticalPage({
   }));
 
   const keepBadgeStyle = useAnimatedStyle(() => ({
-    opacity: keepBadge.value,
+    opacity: keepBadge.value > 0.08 ? 1 : 0,
     transform: [
       {
-        scale: interpolate(keepBadge.value, [0, 1], [0.35, 1.12], Extrapolation.CLAMP),
+        scale: interpolate(keepBadge.value, [0, 1], [0.72, 1.12], Extrapolation.CLAMP),
       },
       {
         rotate: `${interpolate(keepBadge.value, [0, 1], [-18, -6], Extrapolation.CLAMP)}deg`,
@@ -568,22 +693,25 @@ function VerticalPage({
 
   return (
     <View style={styles.verticalPage}>
+      <Animated.View pointerEvents="none" style={[styles.decisionWash, stageWashStyle]} />
       <GestureDetector gesture={gesture}>
-        <Animated.View style={[styles.verticalImageWrap, imageStyle]}>
-          <Image source={{ uri: photo.uri }} style={styles.verticalImage} contentFit="cover" />
-          <View style={styles.verticalShade} />
-          <LinearGradient
-            pointerEvents="none"
-            colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
-            locations={[0, 0.45, 1]}
-            style={styles.bottomFade}
-          />
-          <DecisionOverlay decision={decision} />
-          <PhotoChrome
-            photo={photo}
-            onKeep={playKeep}
-            onDelete={() => startDeleteFling(1)}
-          />
+        <Animated.View style={styles.verticalImageWrap}>
+          <Animated.View style={[styles.verticalImage, frameStyle, photoFadeStyle]}>
+            <Image source={{ uri: photo.uri }} style={styles.verticalImage} contentFit="cover" />
+            <View style={styles.verticalShade} />
+            <LinearGradient
+              pointerEvents="none"
+              colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
+              locations={[0, 0.45, 1]}
+              style={styles.bottomFade}
+            />
+            <DecisionOverlay decision={decision} />
+            <PhotoChrome
+              photo={photo}
+              onKeep={playKeep}
+              onDelete={startDeleteFling}
+            />
+          </Animated.View>
           <View pointerEvents="none" style={styles.badgeLayer}>
             <Stamp kind="keep" style={keepBadgeStyle} />
             <Stamp kind="delete" style={deleteBadgeStyle} />
@@ -767,7 +895,19 @@ const styles = StyleSheet.create({
     ...shadow,
   },
   nextCard: { transform: [{ scale: 0.965 }, { translateY: 10 }], opacity: 0.55 },
+  cardGestureLayer: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1,
+  },
   cardImage: { width: '100%', height: '100%', zIndex: 0 },
+  decisionWash: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 0,
+  },
   cardShade: {
     position: 'absolute',
     top: 0,
@@ -775,7 +915,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     backgroundColor: 'rgba(15,12,9,0.05)',
-    zIndex: 1,
+    zIndex: 3,
   },
   bottomFade: {
     position: 'absolute',
@@ -783,17 +923,29 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 0,
     height: 250,
-    zIndex: 2,
+    zIndex: 4,
   },
   badgeLayer: {
-    ...StyleSheet.absoluteFill,
-    zIndex: 30,
-    elevation: 30,
-  },
-  badgeSlot: {
-    ...StyleSheet.absoluteFill,
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 40,
+    elevation: 40,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingBottom: 36,
+  },
+  badgeSlot: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingBottom: 36,
   },
   centerStamp: {
     minWidth: 210,
@@ -961,7 +1113,7 @@ const styles = StyleSheet.create({
   reviewQueueText: { color: colors.white, fontWeight: '700', fontSize: 14 },
   verticalStage: { flex: 1, backgroundColor: colors.dark },
   verticalPage: { height: VERTICAL_PAGE_HEIGHT, backgroundColor: colors.dark },
-  verticalImageWrap: { flex: 1 },
+  verticalImageWrap: { flex: 1, backgroundColor: colors.dark },
   verticalImage: { width: '100%', height: '100%', zIndex: 0 },
   verticalShade: {
     position: 'absolute',
@@ -970,7 +1122,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     backgroundColor: 'rgba(12,10,8,0.04)',
-    zIndex: 1,
+    zIndex: 3,
   },
   verticalCounter: {
     position: 'absolute',
