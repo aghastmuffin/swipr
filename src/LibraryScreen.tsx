@@ -157,7 +157,7 @@ export function LibraryScreen({ onReview }: Props) {
           </View>
           <View style={styles.overallRule} />
           <View>
-            <Text style={styles.overallNumber}>{months.length}</Text>
+            <Text style={[styles.overallNumber, {marginLeft: 'auto'}]}>{months.length}</Text>
             <Text style={styles.overallLabel}>MONTHS</Text>
           </View>
         </View>
