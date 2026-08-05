@@ -57,7 +57,7 @@ function AppShell() {
       </View>
       <View style={styles.tabBar}>
         <TabButton
-          label="Archive"
+          label="Library"
           active={screen.name === 'library'}
           onPress={() => setScreen({ name: 'library' })}
           icon={<Images size={21} />}
@@ -70,7 +70,7 @@ function AppShell() {
           badge={queueCount}
         />
         <TabButton
-          label="Desk"
+          label="Settings"
           active={screen.name === 'settings'}
           onPress={() => setScreen({ name: 'settings' })}
           icon={<SlidersHorizontal size={21} />}

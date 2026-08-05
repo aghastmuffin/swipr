@@ -10,7 +10,12 @@ import React, {
   useRef,
   useState,
 } from 'react';
-import { indexPhotoLibrary, permanentlyDeleteAssets, requestLibraryAccess } from './media';
+import {
+  IndexProgress,
+  indexPhotoLibrary,
+  permanentlyDeleteAssets,
+  requestLibraryAccess,
+} from './media';
 import {
   AppStats,
   DecisionRecord,
@@ -20,6 +25,7 @@ import {
 } from './types';
 
 const STORAGE_KEY = '@swipr/review-state-v1';
+const INDEX_KEY = '@swipr/photo-index-v1';
 
 const initialStats: AppStats = {
   totalSwiped: 0,
@@ -33,13 +39,21 @@ type PersistedState = {
   stats: AppStats;
 };
 
+type PersistedIndex = {
+  photos: PhotoAsset[];
+  indexedAt: number;
+};
+
 type StoreValue = {
   photos: PhotoAsset[];
   months: MonthCollection[];
   decisions: Record<string, DecisionRecord>;
   stats: AppStats;
   loading: boolean;
+  hasIndexed: boolean;
   indexedCount: number;
+  indexTotal: number;
+  indexPhase: IndexProgress['phase'] | null;
   error?: string;
   permission?: MediaLibrary.PermissionResponse;
   setDecision: (photo: PhotoAsset, decision: ReviewDecision) => void;
@@ -61,28 +75,53 @@ function yesterday(date: string) {
   return value.toISOString().slice(0, 10);
 }
 
+async function saveIndex(photos: PhotoAsset[]) {
+  const payload: PersistedIndex = { photos, indexedAt: Date.now() };
+  await AsyncStorage.setItem(INDEX_KEY, JSON.stringify(payload));
+}
+
 export function PhotoStoreProvider({ children }: PropsWithChildren) {
   const [photos, setPhotos] = useState<PhotoAsset[]>([]);
   const [decisions, setDecisions] = useState<Record<string, DecisionRecord>>({});
   const [stats, setStats] = useState(initialStats);
   const [loading, setLoading] = useState(true);
+  const [hasIndexed, setHasIndexed] = useState(false);
   const [indexedCount, setIndexedCount] = useState(0);
+  const [indexTotal, setIndexTotal] = useState(0);
+  const [indexPhase, setIndexPhase] = useState<IndexProgress['phase'] | null>(null);
   const [permission, setPermission] = useState<MediaLibrary.PermissionResponse>();
   const [error, setError] = useState<string>();
   const [hydrated, setHydrated] = useState(false);
   const reviewedIds = useRef(new Set<string>());
+  const indexingRef = useRef(false);
 
   useEffect(() => {
-    AsyncStorage.getItem(STORAGE_KEY)
-      .then((raw) => {
-        if (!raw) return;
-        const saved = JSON.parse(raw) as PersistedState;
-        setDecisions(saved.decisions ?? {});
-        reviewedIds.current = new Set(Object.keys(saved.decisions ?? {}));
-        setStats({ ...initialStats, ...saved.stats });
-      })
-      .catch(() => undefined)
-      .finally(() => setHydrated(true));
+    (async () => {
+      try {
+        const [stateRaw, indexRaw] = await Promise.all([
+          AsyncStorage.getItem(STORAGE_KEY),
+          AsyncStorage.getItem(INDEX_KEY),
+        ]);
+        if (stateRaw) {
+          const saved = JSON.parse(stateRaw) as PersistedState;
+          setDecisions(saved.decisions ?? {});
+          reviewedIds.current = new Set(Object.keys(saved.decisions ?? {}));
+          setStats({ ...initialStats, ...saved.stats });
+        }
+        if (indexRaw) {
+          const savedIndex = JSON.parse(indexRaw) as PersistedIndex;
+          if (Array.isArray(savedIndex.photos) && savedIndex.photos.length > 0) {
+            setPhotos(savedIndex.photos);
+            setHasIndexed(true);
+            setLoading(false);
+          }
+        }
+      } catch {
+        // Corrupt cache — treat as never indexed.
+      } finally {
+        setHydrated(true);
+      }
+    })();
   }, []);
 
   useEffect(() => {
@@ -92,29 +131,50 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
     );
   }, [decisions, stats, hydrated]);
 
+  const reportProgress = useCallback((progress: IndexProgress) => {
+    setIndexedCount(progress.loaded);
+    setIndexTotal(progress.total);
+    setIndexPhase(progress.phase);
+  }, []);
+
   const refresh = useCallback(async () => {
+    if (indexingRef.current) return;
+    indexingRef.current = true;
     setLoading(true);
     setError(undefined);
     setIndexedCount(0);
+    setIndexTotal(0);
+    setIndexPhase('listing');
     try {
       const result = await requestLibraryAccess();
       setPermission(result);
       if (!result.granted) {
-        setError('Photo access is needed to build your private, on-device library.');
-        setPhotos([]);
+        setError('Photo access is needed to index your library.');
+        if (!hasIndexed) setPhotos([]);
         return;
       }
-      setPhotos(await indexPhotoLibrary(setIndexedCount));
+      const nextPhotos = await indexPhotoLibrary(reportProgress);
+      setPhotos(nextPhotos);
+      setHasIndexed(true);
+      try {
+        await saveIndex(nextPhotos);
+      } catch {
+        // Cache write can fail on huge libraries; in-memory index still works.
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'The library could not be indexed.');
     } finally {
       setLoading(false);
+      setIndexPhase(null);
+      indexingRef.current = false;
     }
-  }, []);
+  }, [hasIndexed, reportProgress]);
 
+  // Auto-index the first time the app has no cached library.
   useEffect(() => {
-    if (hydrated) refresh();
-  }, [hydrated, refresh]);
+    if (!hydrated || hasIndexed || indexingRef.current) return;
+    refresh();
+  }, [hydrated, hasIndexed, refresh]);
 
   const setDecision = useCallback((photo: PhotoAsset, decision: ReviewDecision) => {
     const firstReview = !reviewedIds.current.has(photo.id);
@@ -179,7 +239,11 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
         totalDeleted: current.totalDeleted + assetIds.length,
         storageSaved: current.storageSaved + bytes,
       }));
-      setPhotos((current) => current.filter((photo) => !assetIds.includes(photo.id)));
+      setPhotos((current) => {
+        const next = current.filter((photo) => !assetIds.includes(photo.id));
+        saveIndex(next).catch(() => undefined);
+        return next;
+      });
       assetIds.forEach((id) => reviewedIds.current.delete(id));
       setDecisions((current) => {
         const next = { ...current };
@@ -224,7 +288,10 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
       decisions,
       stats,
       loading,
+      hasIndexed,
       indexedCount,
+      indexTotal,
+      indexPhase,
       error,
       permission,
       setDecision,
@@ -239,7 +306,10 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
       decisions,
       stats,
       loading,
+      hasIndexed,
       indexedCount,
+      indexTotal,
+      indexPhase,
       error,
       permission,
       setDecision,

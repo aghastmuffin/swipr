@@ -1,19 +1,22 @@
 import { Image } from 'expo-image';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
+import * as Sharing from 'expo-sharing';
 import {
   ArrowDown,
   ArrowLeft,
   Check,
-  ChevronUp,
   Cloud,
   HardDrive,
+  MapPin,
   RotateCcw,
+  Share2,
   Sparkles,
   Trash2,
-  X,
 } from 'lucide-react-native';
 import React, { useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   Dimensions,
   FlatList,
   Pressable,
@@ -24,10 +27,14 @@ import {
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
+  Easing,
+  Extrapolation,
   interpolate,
   runOnJS,
   useAnimatedStyle,
   useSharedValue,
+  withDelay,
+  withSequence,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
@@ -36,7 +43,10 @@ import { colors, formatBytes, shadow, type } from './theme';
 import { PhotoAsset, ReviewDecision, ReviewMode } from './types';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const SWIPE_THRESHOLD = SCREEN_WIDTH * 0.24;
+const VERTICAL_PAGE_HEIGHT = Dimensions.get('window').height - 132;
+const SWIPE_DISTANCE = SCREEN_WIDTH * 0.14;
+const SWIPE_VELOCITY = 420;
+const KEEP_BADGE_HOLD_MS = 480;
 
 type Props = {
   monthKey: string;
@@ -45,28 +55,48 @@ type Props = {
   onOpenDelete: () => void;
 };
 
-function PhotoMeta({ photo }: { photo: PhotoAsset }) {
-  return (
-    <View style={styles.metaRow}>
-      <View style={styles.metaPill}>
-        {photo.cloudStatus === 'cloud' ? (
-          <Cloud size={12} color={colors.white} />
-        ) : (
-          <HardDrive size={12} color={colors.white} />
-        )}
-        <Text style={styles.metaPillText}>
-          {photo.cloudStatus === 'cloud'
-            ? 'iCloud'
-            : photo.cloudStatus === 'local'
-              ? 'On device'
-              : 'Location unknown'}
-        </Text>
-      </View>
-      <View style={styles.metaPill}>
-        <Text style={styles.metaPillText}>{formatBytes(photo.size)}</Text>
-      </View>
-    </View>
-  );
+function formatPhotoDate(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  }).format(new Date(timestamp || Date.now()));
+}
+
+function formatPhotoTime(timestamp: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: 'short',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(timestamp || Date.now()));
+}
+
+function formatCoords(location: NonNullable<PhotoAsset['location']>) {
+  const ns = location.latitude >= 0 ? 'N' : 'S';
+  const ew = location.longitude >= 0 ? 'E' : 'W';
+  return `${Math.abs(location.latitude).toFixed(1)}°${ns} · ${Math.abs(location.longitude).toFixed(1)}°${ew}`;
+}
+
+function storageLabel(photo: PhotoAsset) {
+  if (photo.cloudStatus === 'cloud') return 'iCloud';
+  if (photo.cloudStatus === 'local') return 'On device';
+  return 'Storage unknown';
+}
+
+async function sharePhoto(photo: PhotoAsset) {
+  try {
+    const available = await Sharing.isAvailableAsync();
+    if (!available) {
+      Alert.alert('Sharing unavailable', 'Sharing isn’t available on this device.');
+      return;
+    }
+    await Sharing.shareAsync(photo.uri, {
+      mimeType: 'image/jpeg',
+      dialogTitle: photo.filename,
+    });
+  } catch {
+    Alert.alert('Couldn’t share', 'This photo couldn’t be shared right now.');
+  }
 }
 
 function DecisionOverlay({ decision }: { decision?: ReviewDecision }) {
@@ -90,6 +120,95 @@ function DecisionOverlay({ decision }: { decision?: ReviewDecision }) {
   );
 }
 
+function PhotoChrome({
+  photo,
+  onKeep,
+  onDelete,
+}: {
+  photo: PhotoAsset;
+  onKeep: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <View pointerEvents="box-none" style={styles.chrome}>
+      <View style={styles.chromeLeft}>
+        <Text style={styles.chromeDate}>{formatPhotoDate(photo.creationTime)}</Text>
+        <Text style={styles.chromeTime}>{formatPhotoTime(photo.creationTime)}</Text>
+        {photo.location ? (
+          <View style={styles.chromeLine}>
+            <MapPin size={13} color={colors.white} />
+            <Text style={styles.chromeSecondary}>{formatCoords(photo.location)}</Text>
+          </View>
+        ) : null}
+        <View style={styles.chromeLine}>
+          {photo.cloudStatus === 'cloud' ? (
+            <Cloud size={13} color="rgba(255,255,255,0.85)" />
+          ) : (
+            <HardDrive size={13} color="rgba(255,255,255,0.85)" />
+          )}
+          <Text style={styles.chromeSecondary}>
+            {formatBytes(photo.size)} · {storageLabel(photo)}
+          </Text>
+        </View>
+        {photo.similarityGroup ? (
+          <View style={styles.chromeSimilar}>
+            <Sparkles size={12} color={colors.orangeBright} />
+            <Text style={styles.chromeSimilarText}>Similar set</Text>
+          </View>
+        ) : null}
+      </View>
+
+      <View style={styles.chromeRight}>
+        <Pressable
+          accessibilityLabel="Keep photo"
+          style={styles.sideAction}
+          onPress={onKeep}
+        >
+          <Check size={26} color={colors.white} strokeWidth={2.6} />
+          <Text style={styles.sideActionLabel}>Keep</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="Share photo"
+          style={styles.sideAction}
+          onPress={() => sharePhoto(photo)}
+        >
+          <Share2 size={24} color={colors.white} strokeWidth={2.2} />
+          <Text style={styles.sideActionLabel}>Share</Text>
+        </Pressable>
+        <Pressable
+          accessibilityLabel="Queue photo for deletion"
+          style={styles.sideAction}
+          onPress={onDelete}
+        >
+          <Trash2 size={24} color={colors.white} strokeWidth={2.2} />
+          <Text style={styles.sideActionLabel}>Delete</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function Stamp({
+  kind,
+  style,
+}: {
+  kind: 'keep' | 'delete';
+  style: ReturnType<typeof useAnimatedStyle>;
+}) {
+  return (
+    <Animated.View style={[styles.badgeSlot, style]}>
+      <View style={[styles.centerStamp, kind === 'keep' ? styles.keepStamp : styles.deleteStamp]}>
+        {kind === 'keep' ? (
+          <Check size={42} color={colors.white} strokeWidth={3.2} />
+        ) : (
+          <Trash2 size={38} color={colors.white} strokeWidth={2.6} />
+        )}
+        <Text style={styles.centerStampText}>{kind === 'keep' ? 'KEEP' : 'DELETE'}</Text>
+      </View>
+    </Animated.View>
+  );
+}
+
 function CardMode({
   photos,
   startIndex,
@@ -106,6 +225,9 @@ function CardMode({
   const [index, setIndex] = useState(startIndex);
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
+  const deleteBadge = useSharedValue(0);
+  const keepBadge = useSharedValue(0);
+  const locked = useSharedValue(0);
   const current = photos[index];
   const next = photos[index + 1];
 
@@ -120,47 +242,139 @@ function CardMode({
     setIndex((value) => Math.min(value + 1, photos.length));
     translateX.value = 0;
     translateY.value = 0;
+    deleteBadge.value = 0;
+    keepBadge.value = 0;
+    locked.value = 0;
+  };
+
+  const playKeepThenCommit = () => {
+    if (locked.value) return;
+    locked.value = 1;
+    keepBadge.value = withSequence(
+      withSpring(1, { damping: 11, stiffness: 220, mass: 0.7 }),
+      withDelay(
+        KEEP_BADGE_HOLD_MS,
+        withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) }, () => {
+          runOnJS(commit)('keep');
+        }),
+      ),
+    );
+  };
+
+  const startDeleteFling = (direction: number) => {
+    'worklet';
+    if (locked.value) return;
+    locked.value = 1;
+    deleteBadge.value = withSequence(
+      withTiming(1, { duration: 80 }),
+      withTiming(0.25, { duration: 200 }),
+    );
+    translateX.value = withTiming(
+      direction * SCREEN_WIDTH * 1.35,
+      { duration: 240, easing: Easing.out(Easing.cubic) },
+      () => {
+        runOnJS(commit)('delete');
+      },
+    );
   };
 
   const animateDecision = (decision: ReviewDecision) => {
-    const destination = decision === 'keep' ? -SCREEN_WIDTH * 1.4 : SCREEN_WIDTH * 1.4;
-    translateX.value = withTiming(destination, { duration: 220 }, () => {
-      runOnJS(commit)(decision);
-    });
+    if (locked.value) return;
+    if (decision === 'keep') {
+      playKeepThenCommit();
+      return;
+    }
+    startDeleteFling(1);
   };
 
+  const doubleTap = Gesture.Tap()
+    .numberOfTaps(2)
+    .maxDuration(280)
+    .onEnd((_event, success) => {
+      if (!success || locked.value) return;
+      runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
+      runOnJS(playKeepThenCommit)();
+    });
+
   const pan = Gesture.Pan()
+    .activeOffsetX([-12, 12])
+    .failOffsetY([-36, 36])
     .onUpdate((event) => {
+      if (locked.value) return;
       translateX.value = event.translationX;
-      translateY.value = event.translationY * 0.14;
+      translateY.value = event.translationY * 0.08;
+      deleteBadge.value = interpolate(
+        Math.abs(event.translationX),
+        [0, 18, SWIPE_DISTANCE, SCREEN_WIDTH * 0.55],
+        [0, 0.55, 1, 1],
+        Extrapolation.CLAMP,
+      );
     })
     .onEnd((event) => {
-      if (event.translationX < -SWIPE_THRESHOLD || event.velocityX < -800) {
-        translateX.value = withTiming(-SCREEN_WIDTH * 1.4, { duration: 200 }, () =>
-          runOnJS(commit)('keep'),
-        );
-      } else if (event.translationX > SWIPE_THRESHOLD || event.velocityX > 800) {
-        translateX.value = withTiming(SCREEN_WIDTH * 1.4, { duration: 200 }, () =>
-          runOnJS(commit)('delete'),
-        );
+      if (locked.value) return;
+      const shouldDelete =
+        Math.abs(event.translationX) > SWIPE_DISTANCE ||
+        Math.abs(event.velocityX) > SWIPE_VELOCITY;
+      if (shouldDelete) {
+        const direction =
+          event.translationX === 0
+            ? Math.sign(event.velocityX) || 1
+            : Math.sign(event.translationX);
+        startDeleteFling(direction);
       } else {
-        translateX.value = withSpring(0);
-        translateY.value = withSpring(0);
+        translateX.value = withSpring(0, { damping: 18, stiffness: 220 });
+        translateY.value = withSpring(0, { damping: 18, stiffness: 220 });
+        deleteBadge.value = withTiming(0, { duration: 140 });
       }
     });
+
+  const gesture = Gesture.Exclusive(doubleTap, pan);
 
   const cardStyle = useAnimatedStyle(() => ({
     transform: [
       { translateX: translateX.value },
       { translateY: translateY.value },
-      { rotate: `${interpolate(translateX.value, [-SCREEN_WIDTH, 0, SCREEN_WIDTH], [-9, 0, 9])}deg` },
+      {
+        rotate: `${interpolate(
+          translateX.value,
+          [-SCREEN_WIDTH, 0, SCREEN_WIDTH],
+          [-8, 0, 8],
+          Extrapolation.CLAMP,
+        )}deg`,
+      },
+      {
+        scale: interpolate(
+          Math.abs(translateX.value),
+          [0, SCREEN_WIDTH * 0.7],
+          [1, 0.96],
+          Extrapolation.CLAMP,
+        ),
+      },
     ],
   }));
-  const keepStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(translateX.value, [-SWIPE_THRESHOLD, -30], [1, 0]),
+
+  const deleteBadgeStyle = useAnimatedStyle(() => ({
+    opacity: deleteBadge.value,
+    transform: [
+      {
+        scale: interpolate(deleteBadge.value, [0, 1], [0.45, 1.08], Extrapolation.CLAMP),
+      },
+      {
+        rotate: `${interpolate(deleteBadge.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
+      },
+    ],
   }));
-  const deleteStyle = useAnimatedStyle(() => ({
-    opacity: interpolate(translateX.value, [30, SWIPE_THRESHOLD], [0, 1]),
+
+  const keepBadgeStyle = useAnimatedStyle(() => ({
+    opacity: keepBadge.value,
+    transform: [
+      {
+        scale: interpolate(keepBadge.value, [0, 1], [0.35, 1.12], Extrapolation.CLAMP),
+      },
+      {
+        rotate: `${interpolate(keepBadge.value, [0, 1], [-18, -6], Extrapolation.CLAMP)}deg`,
+      },
+    ],
   }));
 
   if (!current) {
@@ -169,9 +383,9 @@ function CardMode({
         <View style={styles.finishedMark}>
           <Check size={30} color={colors.white} />
         </View>
-        <Text style={styles.finishedTitle}>Month reviewed.</Text>
+        <Text style={styles.finishedTitle}>Month done</Text>
         <Text style={styles.finishedText}>
-          Your delete queue is still reversible. Review it before asking Photos to remove anything.
+          Open the Delete tab to remove queued photos.
         </Text>
         <Pressable style={styles.reviewQueueButton} onPress={onOpenDelete}>
           <Trash2 size={18} color={colors.white} />
@@ -188,51 +402,28 @@ function CardMode({
           <Image source={{ uri: next.uri }} style={styles.cardImage} contentFit="cover" />
         </View>
       )}
-      <GestureDetector gesture={pan}>
+      <GestureDetector gesture={gesture}>
         <Animated.View style={[styles.photoCard, cardStyle]}>
           <Image source={{ uri: current.uri }} style={styles.cardImage} contentFit="cover" />
           <View style={styles.cardShade} />
-          <Animated.View style={[styles.gestureOverlay, styles.gestureKeep, keepStyle]}>
-            <Check size={30} color={colors.white} strokeWidth={3} />
-            <Text style={styles.gestureText}>KEEP</Text>
-          </Animated.View>
-          <Animated.View style={[styles.gestureOverlay, styles.gestureDelete, deleteStyle]}>
-            <Trash2 size={27} color={colors.white} />
-            <Text style={styles.gestureText}>DELETE</Text>
-          </Animated.View>
+          <LinearGradient
+            pointerEvents="none"
+            colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
+            locations={[0, 0.45, 1]}
+            style={styles.bottomFade}
+          />
           <DecisionOverlay decision={decisions[current.id]?.decision} />
-          {current.similarityGroup && (
-            <View style={styles.similarBadge}>
-              <Sparkles size={13} color={colors.orange} />
-              <Text style={styles.similarBadgeText}>Similar set</Text>
-            </View>
-          )}
-          <View style={styles.cardFooter}>
-            <Text numberOfLines={1} style={styles.filename}>{current.filename}</Text>
-            <PhotoMeta photo={current} />
+          <PhotoChrome
+            photo={current}
+            onKeep={() => animateDecision('keep')}
+            onDelete={() => animateDecision('delete')}
+          />
+          <View pointerEvents="none" style={styles.badgeLayer}>
+            <Stamp kind="keep" style={keepBadgeStyle} />
+            <Stamp kind="delete" style={deleteBadgeStyle} />
           </View>
         </Animated.View>
       </GestureDetector>
-      <View style={styles.cardActions}>
-        <Pressable
-          accessibilityLabel="Keep photo"
-          style={[styles.roundAction, styles.keepAction]}
-          onPress={() => animateDecision('keep')}
-        >
-          <Check size={28} color={colors.keep} strokeWidth={2.6} />
-        </Pressable>
-        <View style={styles.directionNote}>
-          <Text style={styles.directionText}>LEFT · KEEP</Text>
-          <Text style={styles.directionText}>RIGHT · DELETE</Text>
-        </View>
-        <Pressable
-          accessibilityLabel="Queue photo for deletion"
-          style={[styles.roundAction, styles.deleteAction]}
-          onPress={() => animateDecision('delete')}
-        >
-          <Trash2 size={24} color={colors.danger} />
-        </Pressable>
-      </View>
     </View>
   );
 }
@@ -246,62 +437,157 @@ function VerticalPage({
   decision?: ReviewDecision;
   onDecide: (photo: PhotoAsset, decision: ReviewDecision) => void;
 }) {
-  const lift = useSharedValue(0);
+  const translateX = useSharedValue(0);
+  const deleteBadge = useSharedValue(0);
+  const keepBadge = useSharedValue(0);
+  const locked = useSharedValue(0);
+
+  const commitKeep = () => {
+    onDecide(photo, 'keep');
+    keepBadge.value = 0;
+    locked.value = 0;
+  };
+
+  const commitDelete = () => {
+    onDecide(photo, 'delete');
+    translateX.value = 0;
+    deleteBadge.value = 0;
+    locked.value = 0;
+  };
+
+  const playKeep = () => {
+    if (locked.value) return;
+    locked.value = 1;
+    keepBadge.value = withSequence(
+      withSpring(1, { damping: 11, stiffness: 220, mass: 0.7 }),
+      withDelay(
+        KEEP_BADGE_HOLD_MS,
+        withTiming(0, { duration: 180, easing: Easing.in(Easing.cubic) }, () => {
+          runOnJS(commitKeep)();
+        }),
+      ),
+    );
+  };
+
+  const startDeleteFling = (direction: number) => {
+    'worklet';
+    if (locked.value) return;
+    locked.value = 1;
+    deleteBadge.value = withSequence(
+      withTiming(1, { duration: 80 }),
+      withTiming(0.25, { duration: 200 }),
+    );
+    translateX.value = withTiming(
+      direction * SCREEN_WIDTH * 1.25,
+      { duration: 230, easing: Easing.out(Easing.cubic) },
+      () => {
+        runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Warning);
+        runOnJS(commitDelete)();
+      },
+    );
+  };
+
   const keepTap = Gesture.Tap()
     .numberOfTaps(2)
     .maxDuration(280)
     .onEnd((_event, success) => {
-      if (success) {
-        runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
-        runOnJS(onDecide)(photo, 'keep');
-      }
+      if (!success || locked.value) return;
+      runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Success);
+      runOnJS(playKeep)();
     });
+
   const deletePan = Gesture.Pan()
-    .activeOffsetY(-12)
-    .failOffsetX([-30, 30])
+    .activeOffsetX([-12, 12])
+    .failOffsetY([-24, 24])
     .onUpdate((event) => {
-      lift.value = Math.min(0, event.translationY);
+      if (locked.value) return;
+      translateX.value = event.translationX * 0.92;
+      deleteBadge.value = interpolate(
+        Math.abs(event.translationX),
+        [0, 18, SWIPE_DISTANCE, SCREEN_WIDTH * 0.55],
+        [0, 0.55, 1, 1],
+        Extrapolation.CLAMP,
+      );
     })
     .onEnd((event) => {
-      if (event.translationY < -65) {
-        lift.value = withTiming(-110, { duration: 140 }, () => {
-          runOnJS(Haptics.notificationAsync)(Haptics.NotificationFeedbackType.Warning);
-          runOnJS(onDecide)(photo, 'delete');
-          lift.value = withSpring(0);
-        });
+      if (locked.value) return;
+      const shouldDelete =
+        Math.abs(event.translationX) > SWIPE_DISTANCE ||
+        Math.abs(event.velocityX) > SWIPE_VELOCITY;
+      if (shouldDelete) {
+        const direction =
+          event.translationX === 0
+            ? Math.sign(event.velocityX) || 1
+            : Math.sign(event.translationX);
+        startDeleteFling(direction);
       } else {
-        lift.value = withSpring(0);
+        translateX.value = withSpring(0, { damping: 18, stiffness: 220 });
+        deleteBadge.value = withTiming(0, { duration: 140 });
       }
     });
-  const handleStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: lift.value }],
+
+  const gesture = Gesture.Exclusive(keepTap, deletePan);
+
+  const imageStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      {
+        scale: interpolate(
+          Math.abs(translateX.value),
+          [0, SCREEN_WIDTH * 0.7],
+          [1, 0.97],
+          Extrapolation.CLAMP,
+        ),
+      },
+    ],
+  }));
+
+  const deleteBadgeStyle = useAnimatedStyle(() => ({
+    opacity: deleteBadge.value,
+    transform: [
+      {
+        scale: interpolate(deleteBadge.value, [0, 1], [0.45, 1.08], Extrapolation.CLAMP),
+      },
+      {
+        rotate: `${interpolate(deleteBadge.value, [0, 1], [-14, -8], Extrapolation.CLAMP)}deg`,
+      },
+    ],
+  }));
+
+  const keepBadgeStyle = useAnimatedStyle(() => ({
+    opacity: keepBadge.value,
+    transform: [
+      {
+        scale: interpolate(keepBadge.value, [0, 1], [0.35, 1.12], Extrapolation.CLAMP),
+      },
+      {
+        rotate: `${interpolate(keepBadge.value, [0, 1], [-18, -6], Extrapolation.CLAMP)}deg`,
+      },
+    ],
   }));
 
   return (
     <View style={styles.verticalPage}>
-      <GestureDetector gesture={keepTap}>
-        <View style={styles.verticalImageWrap}>
-          <Image source={{ uri: photo.uri }} style={styles.verticalImage} contentFit="contain" />
+      <GestureDetector gesture={gesture}>
+        <Animated.View style={[styles.verticalImageWrap, imageStyle]}>
+          <Image source={{ uri: photo.uri }} style={styles.verticalImage} contentFit="cover" />
           <View style={styles.verticalShade} />
+          <LinearGradient
+            pointerEvents="none"
+            colors={['transparent', 'rgba(8,7,6,0.28)', 'rgba(8,7,6,0.78)']}
+            locations={[0, 0.45, 1]}
+            style={styles.bottomFade}
+          />
           <DecisionOverlay decision={decision} />
-          {photo.similarityGroup && (
-            <View style={styles.similarBadge}>
-              <Sparkles size={13} color={colors.orange} />
-              <Text style={styles.similarBadgeText}>Likely similar</Text>
-            </View>
-          )}
-          <View style={styles.verticalMeta}>
-            <Text style={styles.verticalFilename} numberOfLines={1}>{photo.filename}</Text>
-            <PhotoMeta photo={photo} />
-            <Text style={styles.doubleTap}>DOUBLE-TAP TO KEEP</Text>
+          <PhotoChrome
+            photo={photo}
+            onKeep={playKeep}
+            onDelete={() => startDeleteFling(1)}
+          />
+          <View pointerEvents="none" style={styles.badgeLayer}>
+            <Stamp kind="keep" style={keepBadgeStyle} />
+            <Stamp kind="delete" style={deleteBadgeStyle} />
           </View>
-        </View>
-      </GestureDetector>
-      <GestureDetector gesture={deletePan}>
-        <Animated.View style={[styles.deleteHandle, handleStyle]}>
-          <ChevronUp size={19} color={colors.white} />
-          <Trash2 size={18} color={colors.white} />
-          <Text style={styles.deleteHandleText}>DRAG UP TO QUEUE DELETE</Text>
         </Animated.View>
       </GestureDetector>
     </View>
@@ -344,8 +630,8 @@ function VerticalMode({
         pagingEnabled
         initialScrollIndex={startIndex}
         getItemLayout={(_data, index) => ({
-          length: Dimensions.get('window').height - 132,
-          offset: (Dimensions.get('window').height - 132) * index,
+          length: VERTICAL_PAGE_HEIGHT,
+          offset: VERTICAL_PAGE_HEIGHT * index,
           index,
         })}
         onScrollToIndexFailed={() => undefined}
@@ -400,7 +686,7 @@ export function ReviewScreen({ monthKey, mode, onClose, onOpenDelete }: Props) {
           <ArrowLeft size={21} color={colors.ink} />
         </Pressable>
         <View style={styles.headerTitleWrap}>
-          <Text style={styles.headerOverline}>{mode === 'cards' ? 'CARD EDIT' : 'VERTICAL EDIT'}</Text>
+          <Text style={styles.headerOverline}>{mode === 'cards' ? 'CARDS' : 'VERTICAL'}</Text>
           <Text style={styles.headerTitle}>{monthLabel}</Text>
         </View>
         <Pressable
@@ -438,56 +724,265 @@ export function ReviewScreen({ monthKey, mode, onClose, onOpenDelete }: Props) {
 
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.paper },
-  header: { height: 72, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: colors.line },
-  headerButton: { width: 42, height: 42, borderRadius: 21, backgroundColor: colors.paperRaised, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
+  header: {
+    height: 72,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: colors.line,
+  },
+  headerButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: colors.paperRaised,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   disabled: { opacity: 0.3 },
   headerTitleWrap: { alignItems: 'center' },
-  headerOverline: { fontFamily: type.mono, color: colors.orange, fontSize: 8, letterSpacing: 1.2 },
+  headerOverline: {
+    fontFamily: type.mono,
+    color: colors.orange,
+    fontSize: 8,
+    letterSpacing: 1.2,
+  },
   headerTitle: { fontFamily: type.serif, color: colors.ink, fontSize: 20, marginTop: 1 },
   reviewProgress: { height: 3, backgroundColor: colors.sand },
   reviewProgressFill: { height: 3, backgroundColor: colors.orange },
-  cardStage: { flex: 1, paddingHorizontal: 18, paddingTop: 18, paddingBottom: 13 },
-  photoCard: { position: 'absolute', top: 18, left: 18, right: 18, bottom: 102, borderRadius: 24, overflow: 'hidden', backgroundColor: colors.dark, ...shadow },
+  cardStage: { flex: 1, paddingHorizontal: 10, paddingTop: 10, paddingBottom: 10 },
+  photoCard: {
+    position: 'absolute',
+    top: 10,
+    left: 10,
+    right: 10,
+    bottom: 10,
+    borderRadius: 22,
+    overflow: 'hidden',
+    backgroundColor: colors.dark,
+    ...shadow,
+  },
   nextCard: { transform: [{ scale: 0.965 }, { translateY: 10 }], opacity: 0.55 },
-  cardImage: { width: '100%', height: '100%' },
-  cardShade: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(15,12,9,0.08)' },
-  gestureOverlay: { position: 'absolute', top: 34, paddingHorizontal: 17, paddingVertical: 11, borderRadius: 9, borderWidth: 3, flexDirection: 'row', alignItems: 'center', gap: 7 },
-  gestureKeep: { left: 22, borderColor: colors.white, backgroundColor: colors.keep },
-  gestureDelete: { right: 22, borderColor: colors.white, backgroundColor: colors.danger },
-  gestureText: { color: colors.white, fontSize: 17, fontWeight: '800', letterSpacing: 1.3 },
-  fixedDecision: { position: 'absolute', top: 18, alignSelf: 'center', paddingHorizontal: 14, paddingVertical: 9, borderRadius: 24, flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 2, borderColor: colors.white },
+  cardImage: { width: '100%', height: '100%', zIndex: 0 },
+  cardShade: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(15,12,9,0.05)',
+    zIndex: 1,
+  },
+  bottomFade: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 250,
+    zIndex: 2,
+  },
+  badgeLayer: {
+    ...StyleSheet.absoluteFill,
+    zIndex: 30,
+    elevation: 30,
+  },
+  badgeSlot: {
+    ...StyleSheet.absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  centerStamp: {
+    minWidth: 210,
+    paddingHorizontal: 28,
+    paddingVertical: 22,
+    borderRadius: 18,
+    borderWidth: 4,
+    borderColor: colors.white,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+  },
+  keepStamp: { backgroundColor: colors.keep },
+  deleteStamp: { backgroundColor: colors.danger },
+  centerStampText: {
+    color: colors.white,
+    fontSize: 34,
+    fontWeight: '900',
+    letterSpacing: 2.2,
+  },
+  fixedDecision: {
+    position: 'absolute',
+    top: 18,
+    alignSelf: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 24,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    borderWidth: 2,
+    borderColor: colors.white,
+    zIndex: 5,
+  },
   keepOverlay: { backgroundColor: colors.keep },
   deleteOverlay: { backgroundColor: colors.danger },
-  fixedDecisionText: { color: colors.white, fontFamily: type.sans, fontWeight: '800', fontSize: 12, letterSpacing: 1 },
-  similarBadge: { position: 'absolute', left: 16, top: 18, backgroundColor: colors.paperRaised, borderRadius: 20, paddingHorizontal: 11, paddingVertical: 7, flexDirection: 'row', gap: 5, alignItems: 'center' },
-  similarBadgeText: { fontFamily: type.serif, color: colors.orange, fontSize: 12 },
-  cardFooter: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingHorizontal: 17, paddingTop: 28, paddingBottom: 17, backgroundColor: 'rgba(24,21,17,0.78)' },
-  filename: { color: colors.white, fontFamily: type.serif, fontSize: 18, marginBottom: 9 },
-  metaRow: { flexDirection: 'row', gap: 7 },
-  metaPill: { flexDirection: 'row', gap: 5, alignItems: 'center', borderRadius: 14, backgroundColor: 'rgba(255,253,248,0.18)', paddingHorizontal: 8, paddingVertical: 5 },
-  metaPillText: { color: colors.white, fontFamily: type.mono, fontSize: 8 },
-  cardActions: { position: 'absolute', left: 20, right: 20, bottom: 11, height: 76, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  roundAction: { width: 62, height: 62, borderRadius: 31, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
-  keepAction: { backgroundColor: colors.keepTint, borderColor: '#B3CDBB' },
-  deleteAction: { backgroundColor: colors.orangeTint, borderColor: '#E4B9A6' },
-  directionNote: { alignItems: 'center', gap: 4 },
-  directionText: { fontFamily: type.mono, color: colors.inkSoft, fontSize: 8, letterSpacing: 0.8 },
-  finished: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 42 },
-  finishedMark: { width: 66, height: 66, borderRadius: 33, backgroundColor: colors.keep, alignItems: 'center', justifyContent: 'center' },
+  fixedDecisionText: {
+    color: colors.white,
+    fontFamily: type.sans,
+    fontWeight: '800',
+    fontSize: 12,
+    letterSpacing: 1,
+  },
+  chrome: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 8,
+    paddingLeft: 16,
+    paddingRight: 10,
+    paddingBottom: 18,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+  },
+  chromeLeft: {
+    flex: 1,
+    paddingRight: 12,
+    paddingBottom: 4,
+    gap: 4,
+  },
+  chromeDate: {
+    color: colors.white,
+    fontFamily: type.serif,
+    fontSize: 26,
+    lineHeight: 30,
+    letterSpacing: -0.4,
+    textShadowColor: 'rgba(0,0,0,0.45)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 6,
+  },
+  chromeTime: {
+    color: 'rgba(255,255,255,0.82)',
+    fontFamily: type.mono,
+    fontSize: 10,
+    letterSpacing: 0.6,
+    marginBottom: 4,
+  },
+  chromeLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 2,
+  },
+  chromeSecondary: {
+    color: 'rgba(255,255,255,0.88)',
+    fontFamily: type.sans,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  chromeSimilar: {
+    marginTop: 8,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: 'rgba(255,253,248,0.16)',
+    borderRadius: 14,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+  },
+  chromeSimilarText: {
+    color: colors.orangeBright,
+    fontFamily: type.serif,
+    fontSize: 12,
+  },
+  chromeRight: {
+    alignItems: 'center',
+    gap: 16,
+    paddingBottom: 2,
+  },
+  sideAction: {
+    alignItems: 'center',
+    gap: 3,
+    minWidth: 54,
+  },
+  sideActionLabel: {
+    color: colors.white,
+    fontFamily: type.sans,
+    fontSize: 11,
+    fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  finished: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 42,
+  },
+  finishedMark: {
+    width: 66,
+    height: 66,
+    borderRadius: 33,
+    backgroundColor: colors.keep,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   finishedTitle: { fontFamily: type.serif, color: colors.ink, fontSize: 32, marginTop: 18 },
-  finishedText: { fontFamily: type.serif, color: colors.inkSoft, textAlign: 'center', fontSize: 16, lineHeight: 24, marginTop: 9 },
-  reviewQueueButton: { marginTop: 20, minHeight: 48, borderRadius: 11, paddingHorizontal: 18, backgroundColor: colors.orange, flexDirection: 'row', alignItems: 'center', gap: 8 },
+  finishedText: {
+    fontFamily: type.serif,
+    color: colors.inkSoft,
+    textAlign: 'center',
+    fontSize: 16,
+    lineHeight: 24,
+    marginTop: 9,
+  },
+  reviewQueueButton: {
+    marginTop: 20,
+    minHeight: 48,
+    borderRadius: 11,
+    paddingHorizontal: 18,
+    backgroundColor: colors.orange,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   reviewQueueText: { color: colors.white, fontWeight: '700', fontSize: 14 },
   verticalStage: { flex: 1, backgroundColor: colors.dark },
-  verticalPage: { height: Dimensions.get('window').height - 132, backgroundColor: colors.dark },
+  verticalPage: { height: VERTICAL_PAGE_HEIGHT, backgroundColor: colors.dark },
   verticalImageWrap: { flex: 1 },
-  verticalImage: { width: '100%', height: '100%' },
-  verticalShade: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, backgroundColor: 'rgba(12,10,8,0.06)' },
-  verticalMeta: { position: 'absolute', left: 18, right: 18, bottom: 70 },
-  verticalFilename: { color: colors.white, fontFamily: type.serif, fontSize: 21, marginBottom: 10 },
-  doubleTap: { color: colors.white, fontFamily: type.mono, fontSize: 8, letterSpacing: 1.2, marginTop: 10 },
-  deleteHandle: { position: 'absolute', bottom: 10, alignSelf: 'center', height: 48, borderRadius: 24, backgroundColor: colors.danger, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 2, borderColor: colors.white },
-  deleteHandleText: { color: colors.white, fontFamily: type.mono, fontWeight: '700', fontSize: 8, letterSpacing: 0.7 },
-  verticalCounter: { position: 'absolute', top: 12, right: 13, flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: colors.paperRaised, borderRadius: 18, paddingHorizontal: 9, paddingVertical: 6 },
+  verticalImage: { width: '100%', height: '100%', zIndex: 0 },
+  verticalShade: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    backgroundColor: 'rgba(12,10,8,0.04)',
+    zIndex: 1,
+  },
+  verticalCounter: {
+    position: 'absolute',
+    top: 12,
+    right: 13,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    backgroundColor: colors.paperRaised,
+    borderRadius: 18,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+  },
   verticalCounterText: { fontFamily: type.mono, fontSize: 9, color: colors.ink },
 });

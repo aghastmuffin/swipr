@@ -3,7 +3,13 @@ import * as MediaLibrary from 'expo-media-library/legacy';
 import * as FileSystem from 'expo-file-system/legacy';
 import { CloudStatus, PhotoAsset } from './types';
 
-const PAGE_SIZE = 250;
+export const INDEX_PAGE_SIZE = 250;
+
+export type IndexProgress = {
+  loaded: number;
+  total: number;
+  phase: 'listing' | 'indexing';
+};
 
 function monthFor(timestamp: number) {
   const date = new Date(timestamp || Date.now());
@@ -72,29 +78,40 @@ export async function requestLibraryAccess() {
 }
 
 export async function indexPhotoLibrary(
-  onProgress?: (loaded: number) => void,
+  onProgress?: (progress: IndexProgress) => void,
 ): Promise<PhotoAsset[]> {
   const assets: MediaLibrary.Asset[] = [];
   let after: string | undefined;
   let hasNextPage = true;
+  let total = 0;
 
   while (hasNextPage) {
     const page = await MediaLibrary.getAssetsAsync({
-      first: PAGE_SIZE,
+      first: INDEX_PAGE_SIZE,
       after,
       mediaType: MediaLibrary.MediaType.photo,
       sortBy: [[MediaLibrary.SortBy.creationTime, false]],
     });
+    if (!total) total = Math.max(page.totalCount || 0, page.assets.length);
     assets.push(...page.assets);
-    onProgress?.(assets.length);
+    total = Math.max(total, assets.length, page.totalCount || 0);
+    onProgress?.({
+      loaded: assets.length,
+      total,
+      phase: 'listing',
+    });
     after = page.endCursor;
     hasNextPage = page.hasNextPage;
   }
+
+  total = Math.max(total, assets.length);
+  let processed = 0;
 
   const photos = await mapWithConcurrency(assets, 8, async (asset) => {
     let cloudStatus: CloudStatus = Platform.OS === 'android' ? 'local' : 'unknown';
     let displayUri = asset.uri;
     let size: number | undefined;
+    let location: PhotoAsset['location'];
 
     try {
       // The false flag is important: indexing must never silently pull an iCloud
@@ -113,10 +130,28 @@ export async function indexPhotoLibrary(
         const file = await FileSystem.getInfoAsync(info.localUri);
         if (file.exists && typeof file.size === 'number') size = file.size;
       }
+
+      if (
+        info.location &&
+        Number.isFinite(info.location.latitude) &&
+        Number.isFinite(info.location.longitude)
+      ) {
+        location = {
+          latitude: info.location.latitude,
+          longitude: info.location.longitude,
+        };
+      }
     } catch {
       // Limited-library assets and provider-backed Android media can decline
       // extended metadata. The UI intentionally labels this as unavailable.
     }
+
+    processed += 1;
+    onProgress?.({
+      loaded: processed,
+      total,
+      phase: 'indexing',
+    });
 
     const month = monthFor(asset.creationTime);
     return {
@@ -131,6 +166,7 @@ export async function indexPhotoLibrary(
       monthLabel: month.label,
       cloudStatus,
       size,
+      location,
       mediaSubtype: asset.mediaSubtypes?.[0],
     } satisfies PhotoAsset;
   });

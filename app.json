@@ -12,9 +12,10 @@
       "supportsTablet": true,
       "infoPlist": {
         "NSPhotoLibraryUsageDescription": "Swipr indexes your photo library on-device so you can review and organise your photos.",
-        "NSPhotoLibraryAddUsageDescription": "Swipr needs access to apply photo library changes you explicitly confirm."
+        "NSPhotoLibraryAddUsageDescription": "Swipr needs access to apply photo library changes you explicitly confirm.",
+        "ITSAppUsesNonExemptEncryption": false
       },
-      "bundleIdentifier": "com.levitk.swipr"
+      "bundleIdentifier": "co.taeson.swipr"
     },
     "android": {
       "permissions": [
@@ -32,7 +33,7 @@
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false,
-      "package": "com.levitk.swipr"
+      "package": "co.taeson.swipr"
     },
     "web": {
       "favicon": "./assets/favicon.png"
@@ -49,7 +50,13 @@
         }
       ],
       "expo-image",
-      "expo-font"
-    ]
+      "expo-font",
+      "expo-sharing"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "b9bab79e-e0c3-47ce-ba6d-52a67817debd"
+      }
+    }
   }
 }

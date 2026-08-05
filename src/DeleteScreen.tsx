@@ -1,5 +1,5 @@
 import { Image } from 'expo-image';
-import { Check, RotateCcw, ShieldCheck, Trash2 } from 'lucide-react-native';
+import { Check, RotateCcw, Trash2 } from 'lucide-react-native';
 import React, { useMemo, useState } from 'react';
 import {
   Alert,
@@ -45,12 +45,12 @@ export function DeleteScreen() {
   const removeSelected = () => {
     const ids = [...selected];
     Alert.alert(
-      'Ask Photos to delete?',
-      `${ids.length} selected ${ids.length === 1 ? 'photo' : 'photos'} will be passed to ${
+      'Delete these photos?',
+      `${ids.length} ${ids.length === 1 ? 'photo' : 'photos'} will be sent to ${
         Platform.OS === 'ios' ? 'iOS Photos' : 'Android'
-      }. The operating system may show another confirmation. Swipr cannot bypass it or empty Recently Deleted.`,
+      } for deletion. You may get another system confirmation.`,
       [
-        { text: 'Not yet', style: 'cancel' },
+        { text: 'Cancel', style: 'cancel' },
         {
           text: 'Continue',
           style: 'destructive',
@@ -61,10 +61,10 @@ export function DeleteScreen() {
               if (removed) setSelected(new Set());
             } catch (cause) {
               Alert.alert(
-                'Nothing was deleted',
+                'Delete failed',
                 cause instanceof Error
                   ? cause.message
-                  : 'The system declined or could not complete the request.',
+                  : 'The system couldn’t complete the request.',
               );
             } finally {
               setBusy(false);
@@ -78,34 +78,19 @@ export function DeleteScreen() {
   return (
     <View style={styles.screen}>
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        <Text style={styles.overline}>REVERSIBLE COLLECTION</Text>
-        <Text style={styles.title}>Delete, later.</Text>
-        <Text style={styles.intro}>
-          These photos are hidden from month feeds, but still live in your library. Restore
-          freely—or select a batch when you are certain.
-        </Text>
-
-        <View style={styles.safetyCard}>
-          <ShieldCheck size={23} color={colors.keep} />
-          <View style={styles.safetyCopy}>
-            <Text style={styles.safetyTitle}>No silent deletion</Text>
-            <Text style={styles.safetyText}>
-              Final deletion only runs while the app is open and requires the permissions and
-              confirmation enforced by your operating system.
-            </Text>
-          </View>
-        </View>
+        <Text style={styles.overline}>DELETE</Text>
+        <Text style={styles.title}>Delete queue</Text>
 
         <View style={styles.summary}>
           <View>
             <Text style={styles.summaryValue}>{queued.length}</Text>
-            <Text style={styles.summaryLabel}>IN THE QUEUE</Text>
+            <Text style={styles.summaryLabel}>IN QUEUE</Text>
           </View>
           <View>
             <Text style={styles.summaryValue}>
               {formatBytes(queued.reduce((sum, photo) => sum + (photo.size ?? 0), 0))}
             </Text>
-            <Text style={styles.summaryLabel}>KNOWN SIZE</Text>
+            <Text style={styles.summaryLabel}>EST. SIZE</Text>
           </View>
         </View>
 
@@ -114,13 +99,13 @@ export function DeleteScreen() {
             <View style={styles.emptyIcon}>
               <Check size={28} color={colors.keep} />
             </View>
-            <Text style={styles.emptyTitle}>The queue is empty.</Text>
-            <Text style={styles.emptyText}>Photos you swipe right will wait here.</Text>
+            <Text style={styles.emptyTitle}>Queue is empty</Text>
+            <Text style={styles.emptyText}>Swipe a photo to delete and it’ll show up here.</Text>
           </View>
         ) : (
           <>
             <View style={styles.selectRow}>
-              <Text style={styles.sectionTitle}>Queued frames</Text>
+              <Text style={styles.sectionTitle}>Photos</Text>
               <Pressable
                 onPress={() =>
                   setSelected(
@@ -190,12 +175,7 @@ const styles = StyleSheet.create({
   content: { padding: 20 },
   overline: { fontFamily: type.mono, color: colors.orange, fontSize: 9, letterSpacing: 1.4, marginTop: 8 },
   title: { fontFamily: type.serif, color: colors.ink, fontSize: 48, letterSpacing: -1.7, marginTop: 6 },
-  intro: { fontFamily: type.serif, color: colors.inkSoft, fontSize: 16, lineHeight: 24, marginTop: 10 },
-  safetyCard: { flexDirection: 'row', gap: 12, backgroundColor: colors.keepTint, borderRadius: 16, padding: 16, marginTop: 22, borderLeftWidth: 3, borderLeftColor: colors.keep },
-  safetyCopy: { flex: 1 },
-  safetyTitle: { fontFamily: type.serif, color: colors.ink, fontSize: 17 },
-  safetyText: { fontFamily: type.serif, color: colors.inkSoft, fontSize: 13, lineHeight: 19, marginTop: 4 },
-  summary: { flexDirection: 'row', gap: 44, paddingVertical: 24, borderBottomWidth: 1, borderBottomColor: colors.line },
+  summary: { flexDirection: 'row', gap: 44, paddingVertical: 24, borderBottomWidth: 1, borderBottomColor: colors.line, marginTop: 10 },
   summaryValue: { fontFamily: type.serif, color: colors.ink, fontSize: 25 },
   summaryLabel: { fontFamily: type.mono, color: colors.inkSoft, fontSize: 8, letterSpacing: 1, marginTop: 3 },
   selectRow: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', marginTop: 25, marginBottom: 12 },

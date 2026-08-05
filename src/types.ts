@@ -14,6 +14,7 @@ export interface PhotoAsset {
   monthLabel: string;
   cloudStatus: CloudStatus;
   size?: number;
+  location?: { latitude: number; longitude: number };
   similarityGroup?: string;
   mediaSubtype?: string;
 }
