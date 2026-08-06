@@ -258,28 +258,48 @@ export function PhotoStoreProvider({ children }: PropsWithChildren) {
   );
 
   const months = useMemo(() => {
-    const grouped = new Map<string, PhotoAsset[]>();
-    photos.forEach((photo) => {
-      if (decisions[photo.id]?.decision === 'delete') return;
-      grouped.set(photo.monthKey, [...(grouped.get(photo.monthKey) ?? []), photo]);
-    });
-    return [...grouped.entries()]
-      .map(([key, monthPhotos]) => {
-        const allInMonth = photos.filter((photo) => photo.monthKey === key);
-        return {
+    // Bolt Optimization: Group and aggregate month statistics in a single linear O(N) pass.
+    // This avoids nested filtering/reduction on the entire photo array for each month,
+    // reducing complexity from O(N * M) to O(N). Also replaces costly array spreads
+    // with direct pushes to prevent garbage collection churn and O(K^2) grouping copying.
+    const monthMap = new Map<string, MonthCollection>();
+
+    for (let i = 0; i < photos.length; i++) {
+      const photo = photos[i];
+      const key = photo.monthKey;
+      let monthData = monthMap.get(key);
+      if (!monthData) {
+        monthData = {
           key,
-          label: monthPhotos[0]?.monthLabel ?? key,
-          photos: monthPhotos,
-          reviewed: allInMonth.filter((photo) => decisions[photo.id]).length,
-          queued: allInMonth.filter(
-            (photo) => decisions[photo.id]?.decision === 'delete',
-          ).length,
-          estimatedBytes: allInMonth.reduce(
-            (sum, photo) => sum + (photo.size ?? 0),
-            0,
-          ),
+          label: photo.monthLabel ?? key,
+          photos: [],
+          reviewed: 0,
+          queued: 0,
+          estimatedBytes: 0,
         };
-      })
+        monthMap.set(key, monthData);
+      }
+
+      // Add to estimatedBytes (for all photos in the month)
+      monthData.estimatedBytes += photo.size ?? 0;
+
+      // Check decisions
+      const decisionRecord = decisions[photo.id];
+      if (decisionRecord) {
+        monthData.reviewed += 1;
+        if (decisionRecord.decision === 'delete') {
+          monthData.queued += 1;
+        }
+      }
+
+      // If not deleted, add to active photos list
+      if (!decisionRecord || decisionRecord.decision !== 'delete') {
+        monthData.photos.push(photo);
+      }
+    }
+
+    return Array.from(monthMap.values())
+      .filter((monthData) => monthData.photos.length > 0)
       .sort((a, b) => b.key.localeCompare(a.key));
   }, [photos, decisions]);
 
