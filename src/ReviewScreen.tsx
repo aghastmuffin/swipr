@@ -800,7 +800,9 @@ function VerticalMode({
             />
           );
         }}
-        pagingEnabled
+        snapToInterval={VERTICAL_PAGE_HEIGHT}
+        snapToAlignment="start"
+        decelerationRate="fast"
         initialScrollIndex={Math.min(startIndex, Math.max(0, photos.length))}
         getItemLayout={(_items, index) => ({
           length: VERTICAL_PAGE_HEIGHT,
