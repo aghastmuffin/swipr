@@ -1,7 +1,7 @@
 name: EAS Build
 
 on:
-  push:
+  release:
     branches: [master]
   workflow_dispatch:
     inputs:
